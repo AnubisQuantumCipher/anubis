@@ -24,7 +24,7 @@ replaces=('anubis-rage')
 install="${pkgname}.install"
 
 source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('5e39458624363faae16e2998071faeb45768d94d9140267c96896e0e9e8e7257')
 
 prepare() {
   cd "${pkgname}-${pkgver}"
