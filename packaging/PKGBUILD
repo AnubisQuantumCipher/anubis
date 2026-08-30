@@ -1,7 +1,7 @@
 # Maintainer: Anubis Quantum Cipher <https://github.com/AnubisQuantumCipher>
 
 pkgname=anubis
-pkgver=2.0.0
+pkgver=2.1.0
 pkgrel=1
 pkgdesc="Post-quantum file encryption with hybrid X25519+ML-KEM-1024 and ML-DSA-87 signatures"
 arch=('x86_64' 'aarch64')

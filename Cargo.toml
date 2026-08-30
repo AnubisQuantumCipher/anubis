@@ -3,12 +3,19 @@ resolver = "3"
 members = ["crates/anubis-crypto", "crates/anubis-cli"]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Anubis Quantum Cipher"]
 repository = "https://github.com/AnubisQuantumCipher/anubis"
+
+# `kani` is the model checker used for the proof harnesses in
+# crates/anubis-crypto. It is a real cfg, set by the Kani driver rather than by
+# cargo, so rustc's check-cfg lint has no way to know about it. Declaring it
+# here keeps `-D warnings` meaningful instead of permanently noisy.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [profile.release]
 opt-level = 3

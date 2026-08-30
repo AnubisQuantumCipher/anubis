@@ -13,10 +13,10 @@
 //! formal guarantee. That is precisely why every recipient also carries an
 //! 80-bit fingerprint (see `keys::fingerprint`) for human verification.
 
+use bech32::Fe32;
 use bech32::primitives::checksum::Checksum;
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::primitives::gf32_ext::Fe1024;
-use bech32::Fe32;
 
 /// Bech32m checksum with no code-length limit.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

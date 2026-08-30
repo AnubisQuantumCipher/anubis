@@ -59,7 +59,10 @@ fn address_book_survives_a_full_round_trip() {
     // The key must survive byte-for-byte, not merely be present.
     assert_eq!(book[0]["key"].as_str().unwrap(), recipient);
 
-    let (ok, out) = run(&home, &["recipient", "remove", "--json", "--label", "alice"]);
+    let (ok, out) = run(
+        &home,
+        &["recipient", "remove", "--json", "--label", "alice"],
+    );
     assert!(ok, "recipient remove failed: {out}");
     let (ok, out) = run(&home, &["status", "--json"]);
     assert!(ok, "status failed after remove: {out}");

@@ -21,3 +21,6 @@ toml = "1.1.4"
 [[bin]]
 name = "anubis"
 path = "src/main.rs"
+
+[lints]
+workspace = true

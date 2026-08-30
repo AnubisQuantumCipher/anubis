@@ -185,7 +185,10 @@ pub fn spill_file() -> Result<std::fs::File> {
 #[must_use]
 pub fn tmp_beside(path: &Path) -> PathBuf {
     let mut name = std::ffi::OsString::from(".");
-    name.push(path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("out")));
+    name.push(
+        path.file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("out")),
+    );
     name.push(format!(".{}.partial", std::process::id()));
     path.with_file_name(name)
 }

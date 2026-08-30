@@ -35,8 +35,7 @@ pub fn recipients_path() -> Result<PathBuf> {
 /// Create the directory tree, keeping secrets at mode 0700.
 pub fn ensure_dirs() -> Result<()> {
     let ids = identities_dir()?;
-    std::fs::create_dir_all(&ids)
-        .with_context(|| format!("creating {}", ids.display()))?;
+    std::fs::create_dir_all(&ids).with_context(|| format!("creating {}", ids.display()))?;
     std::fs::create_dir_all(state_dir()?)?;
 
     #[cfg(unix)]
@@ -83,10 +82,10 @@ pub fn load_recipients() -> Result<BTreeMap<String, String>> {
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let book: Book = toml::from_str(&text)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let book: Book =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     Ok(book.recipients)
 }
 

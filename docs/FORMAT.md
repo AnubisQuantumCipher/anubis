@@ -1,13 +1,13 @@
 # ANUBIS/v3 File Format Specification
 
 Wire format: `ANUBIS/v3`, version line `anubis-encryption.org/v3`
-Reference implementation: ANUBIS 2.0.0
+Reference implementation: ANUBIS 2.1.0
 Status: stable
 Encoding of this document: US-ASCII
 
 **The format version and the software version are independent, and they do not
-match.** The wire format is **v3**; the software that implements it is version
-**2.0.0**. This is correct and deliberate: the predecessor tool,
+match.** The wire format is **v3**; the software that implements it is the **2.x**
+line. This is correct and deliberate: the predecessor tool,
 `anubis-rage`, already shipped two incompatible formats numbered v1 and v2, so
 the first format specified in this document has to be v3. Do not "correct"
 either number to agree with the other. Section 15 documents the lineage.
@@ -1558,7 +1558,7 @@ identity is in memory.
 |---|---|---|---|
 | `anubis-encryption.org/v1` | `anubis-rage` 1.x | Pure ML-KEM-1024 | No |
 | `anubis-encryption.org/v2` | `anubis-rage` 1.4.0 | Hybrid, stanza tag `hybrid` | No |
-| `anubis-encryption.org/v3` | ANUBIS 2.0.0 | This specification | Yes |
+| `anubis-encryption.org/v3` | ANUBIS 2.0.0 and later | This specification | Yes |
 
 **ANUBIS/v3**, specified by this document: hybrid X25519 + ML-KEM-1024,
 ML-DSA-87 signatures, HKDF-SHA-512, transcript-bound KEM combiner, seed-form
@@ -1568,7 +1568,7 @@ The two `anubis-rage` formats are not interoperable with v3. They differ in the
 KEM combiner, the key encodings, and the header grammar, and they required
 liboqs. See `MIGRATION.md`.
 
-### 15.2 Why this format is v3 while the software is 2.0.0
+### 15.2 Why this format is v3 while the software is 2.x
 
 The obvious question, answered so that nobody renumbers either value.
 
@@ -1577,8 +1577,10 @@ them v1 and v2. Both identifiers are therefore permanently spent. This
 specification describes a third incompatible format, so it takes the next free
 identifier, v3.
 
-The software implementing it is version 2.0.0, because it is the second major
-release of the ANUBIS tool, following the 1.x `anubis-rage` line. The two
+The software implementing it is the 2.x line, because it is the second major
+release of the ANUBIS tool, following the 1.x `anubis-rage` line. Point
+releases within 2.x move the software version and never the format: `verify`
+arrived in 2.1.0 and reads exactly the same v3 containers 2.0.0 wrote. The two
 numbering sequences count different things and there is no reason for them to
 agree:
 

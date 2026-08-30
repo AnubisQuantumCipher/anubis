@@ -42,10 +42,7 @@ use anubis_crypto::stream::{CHUNK, TAG};
 
 fn seal(data: &[u8], recipients: &[Recipient], signer: Option<&Identity>) -> Vec<u8> {
     let mut out = Vec::new();
-    let opts = EncryptOptions {
-        recipients,
-        signer,
-    };
+    let opts = EncryptOptions { recipients, signer };
     format::encrypt(&opts, &mut &data[..], &mut out, |_| {}).expect("encrypt");
     out
 }
@@ -1055,7 +1052,8 @@ fn more_stanzas_than_the_cap_are_rejected() {
             Err(e) => e,
         };
         assert!(
-            err.to_string().contains(&format!("more than {MAX_STANZAS}")),
+            err.to_string()
+                .contains(&format!("more than {MAX_STANZAS}")),
             "{n} stanzas: expected the stanza cap to fire, got {err}"
         );
         let err = must_refuse(&file, &id, &format!("{n} stanzas"));
@@ -1290,8 +1288,7 @@ fn decrypt_unsized_agrees_with_decrypt() {
             let (sized, sized_out) = open_raw(&sealed, std::slice::from_ref(&id));
             let sized = sized.unwrap_or_else(|e| panic!("sized failed at {len}: {e}"));
             let (un, un_out) = open_unsized(&sealed[..], std::slice::from_ref(&id));
-            let un =
-                un.unwrap_or_else(|e| panic!("unsized failed at signed={signed} {len}: {e}"));
+            let un = un.unwrap_or_else(|e| panic!("unsized failed at signed={signed} {len}: {e}"));
 
             assert_eq!(sized_out, data, "sized output at {len}");
             assert_eq!(un_out, data, "unsized output at signed={signed} {len}");
@@ -1491,7 +1488,10 @@ fn the_same_recipient_listed_twice_uses_independent_wrap_keys() {
     assert_eq!(header.stanzas.len(), 2);
     let (a, b) = (&header.stanzas[0], &header.stanzas[1]);
 
-    assert_ne!(a.epk, b.epk, "the two stanzas share an ephemeral X25519 key");
+    assert_ne!(
+        a.epk, b.epk,
+        "the two stanzas share an ephemeral X25519 key"
+    );
     assert_ne!(
         a.mlkem_ct, b.mlkem_ct,
         "the two stanzas share an ML-KEM ciphertext"
@@ -1851,7 +1851,7 @@ fn from_payload_rejects_every_wrong_length() {
             "Identity::from_payload accepted {n} bytes"
         );
     }
-    assert!(Identity::from_payload(&vec![0u8; IDENTITY_LEN]).is_ok());
+    assert!(Identity::from_payload(&[0u8; IDENTITY_LEN]).is_ok());
 }
 
 #[test]
@@ -1880,7 +1880,10 @@ fn armor_round_trips_and_is_recognised() {
         let text = armor::encode(&raw);
         assert!(text.starts_with(armor::BEGIN), "missing begin boundary");
         assert!(text.ends_with('\n'), "armor must end with a newline");
-        assert!(text.lines().any(|l| l == armor::END), "missing end boundary");
+        assert!(
+            text.lines().any(|l| l == armor::END),
+            "missing end boundary"
+        );
         assert!(
             armor::looks_armored(text.as_bytes()),
             "not recognised at {len}"
@@ -2083,7 +2086,13 @@ fn armor_does_not_mask_an_integrity_failure() {
     // A corrupted container inside valid armor must still be caught by the
     // container itself, in the header, the payload and the trailer alike.
     let hlen = header_len_of(&sealed);
-    for at in [10usize, hlen - 2, hlen + 5, sealed.len() - SIG_LEN + 3, sealed.len() - 1] {
+    for at in [
+        10usize,
+        hlen - 2,
+        hlen + 5,
+        sealed.len() - SIG_LEN + 3,
+        sealed.len() - 1,
+    ] {
         let mut bad = sealed.clone();
         bad[at] ^= 0x01;
         let text = armor::encode(&bad);
@@ -2186,14 +2195,18 @@ fn eight_mebibyte_round_trip_is_byte_identical() {
 
 fn verify_bytes(sealed: &[u8]) -> anubis_crypto::Result<format::Verification> {
     let len = sealed.len() as u64;
-    format::verify(&sealed[..], len)
+    format::verify(sealed, len)
 }
 
 #[test]
 fn verify_accepts_a_signed_container_without_any_identity() {
     let signer = Identity::generate().unwrap();
     let to = Identity::generate().unwrap();
-    let sealed = seal(b"sealed to somebody else", &[to.to_recipient().unwrap()], Some(&signer));
+    let sealed = seal(
+        b"sealed to somebody else",
+        &[to.to_recipient().unwrap()],
+        Some(&signer),
+    );
 
     // No identity is passed in, and the one that could decrypt is not the one
     // that signed. This is the third-party auditor's position exactly.
@@ -2241,7 +2254,11 @@ fn verify_refuses_a_tampered_payload() {
 fn verify_refuses_a_tampered_header() {
     let signer = Identity::generate().unwrap();
     let to = Identity::generate().unwrap();
-    let sealed = seal(b"header integrity", &[to.to_recipient().unwrap()], Some(&signer));
+    let sealed = seal(
+        b"header integrity",
+        &[to.to_recipient().unwrap()],
+        Some(&signer),
+    );
 
     // The signature covers the header including its MAC line, so a header
     // edit breaks it even though the verifier cannot check the MAC itself.
@@ -2257,7 +2274,7 @@ fn verify_refuses_a_swapped_signature() {
     let to = Identity::generate().unwrap();
     let rec = to.to_recipient().unwrap();
 
-    let one = seal(b"message one", &[rec.clone()], Some(&a));
+    let one = seal(b"message one", std::slice::from_ref(&rec), Some(&a));
     let two = seal(b"message two", &[rec], Some(&b));
 
     // Graft b's trailer onto a's container: a valid signature, wrong bytes.
@@ -2271,7 +2288,11 @@ fn verify_refuses_a_swapped_signature() {
 fn verify_refuses_a_truncated_container() {
     let signer = Identity::generate().unwrap();
     let to = Identity::generate().unwrap();
-    let sealed = seal(&pseudo(100_000, 9), &[to.to_recipient().unwrap()], Some(&signer));
+    let sealed = seal(
+        &pseudo(100_000, 9),
+        &[to.to_recipient().unwrap()],
+        Some(&signer),
+    );
     let header = header_len_of(&sealed);
 
     // Truncation splits into two regimes and the boundary is worth pinning,
@@ -2286,7 +2307,7 @@ fn verify_refuses_a_truncated_container() {
         header,
         header + 1,
         header + SIG_LEN - 1,
-        header + SIG_LEN,          // trailer fits, payload is empty
+        header + SIG_LEN,           // trailer fits, payload is empty
         header + SIG_LEN + TAG - 1, // payload smaller than one tag
     ];
     for cut in cuts {
@@ -2308,12 +2329,15 @@ fn verify_refuses_a_truncated_container() {
     ));
 }
 
-
 #[test]
 fn verify_agrees_with_inspect_on_header_facts() {
     let signer = Identity::generate().unwrap();
     let to = Identity::generate().unwrap();
-    let sealed = seal(&pseudo(300_000, 77), &[to.to_recipient().unwrap()], Some(&signer));
+    let sealed = seal(
+        &pseudo(300_000, 77),
+        &[to.to_recipient().unwrap()],
+        Some(&signer),
+    );
     let len = sealed.len() as u64;
 
     let i = format::inspect(&sealed[..], len).expect("inspect");

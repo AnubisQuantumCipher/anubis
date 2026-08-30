@@ -47,6 +47,16 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="2.1.0" date="2026-08-30">
+      <description>
+        <p>
+          Signatures can now be checked without a key. The container
+          inspector reports a signature's presence and its validity as
+          separate states, and only calls one verified once a check has
+          actually run over those bytes.
+        </p>
+      </description>
+    </release>
     <release version="2.0.0" date="2026-08-30">
       <description>
         <p>First standalone release.</p>

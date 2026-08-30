@@ -7,7 +7,7 @@ optional ML-DSA-87 signatures, ChaCha20-Poly1305 payloads.
 cryptographic primitive is a pure-Rust implementation, so `cargo install` works
 on a stock Arch or Omarchy system with nothing but a Rust toolchain.
 
-Wire format `ANUBIS/v3`. Software version 2.0.0. Those numbers differ on
+Wire format `ANUBIS/v3`. Software version 2.1.0. Those numbers differ on
 purpose; see [Version numbering](#version-numbering).
 
 One repository, three surfaces:
@@ -79,7 +79,7 @@ Arch users can build a package from `packaging/PKGBUILD`:
 cd packaging && makepkg -si
 ```
 
-Note that the PKGBUILD builds the released `v2.0.0` tag fetched from GitHub --
+Note that the PKGBUILD builds the released `v2.1.0` tag fetched from GitHub --
 the standard Arch practice -- not whatever state your working tree is in.
 
 Ensure `~/.local/bin` is on your `PATH`. Shell completions are not installed by
@@ -641,12 +641,12 @@ as a public issue. See `docs/SECURITY.md` section 7.
 
 ## Version numbering
 
-The wire format is **v3** while the software is **2.0.0**. Both are correct.
+The wire format is **v3** while the software is **2.x**. Both are correct.
 
 `anubis-rage` published two mutually incompatible wire formats and numbered them
 v1 and v2, spending both identifiers. The format specified here is a third
 incompatible format, so it takes v3. The software is the second major release
-of the tool, so it is 2.0.0. The two sequences count different things: format
+of the tool, so it is 2.x. The two sequences count different things: format
 versions count incompatible on-disk formats, software versions count releases.
 
 A future 2.1 or 3.0 that does not change the on-disk format will still write

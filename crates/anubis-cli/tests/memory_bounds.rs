@@ -169,7 +169,11 @@ fn large_decrypt_is_constant_memory() {
     let (hw, ok) = watch_to_completion(child);
 
     assert!(ok, "decrypt failed");
-    assert_eq!(std::fs::read(&restored).unwrap(), data, "round trip differs");
+    assert_eq!(
+        std::fs::read(&restored).unwrap(),
+        data,
+        "round trip differs"
+    );
     // Measured baseline is ~3.2 MiB regardless of size; 32 MiB catches a
     // reversion to whole-plaintext buffering without being flaky.
     assert!(

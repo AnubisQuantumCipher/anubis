@@ -9,7 +9,7 @@
 _anubis_first_steps() {
     cat <<'EOF'
 
-ANUBIS 2.0.0 installed.  Wire format ANUBIS/v3.
+ANUBIS 2.1.0 installed.  Wire format ANUBIS/v3.
 
   Generate an identity (decrypts and signs):
       anubis keygen --name default

@@ -147,12 +147,14 @@ where
         buf.clear();
         buf.extend_from_slice(&cur[..cur_len]);
         let nonce = nonce_for(counter, last)?;
-        cipher.decrypt_in_place(&nonce, b"", &mut buf).map_err(|_| {
-            Error::Integrity(format!(
-                "chunk {counter} failed authentication: the file was modified, \
+        cipher
+            .decrypt_in_place(&nonce, b"", &mut buf)
+            .map_err(|_| {
+                Error::Integrity(format!(
+                    "chunk {counter} failed authentication: the file was modified, \
                  truncated, or is not addressed to this identity"
-            ))
-        })?;
+                ))
+            })?;
         writer.write_all(&buf)?;
 
         total += buf.len() as u64;

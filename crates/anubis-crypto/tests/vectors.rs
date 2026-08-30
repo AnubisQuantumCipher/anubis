@@ -9,10 +9,7 @@ use anubis_crypto::stream::CHUNK;
 
 fn seal(data: &[u8], recipients: &[Recipient], signer: Option<&Identity>) -> Vec<u8> {
     let mut out = Vec::new();
-    let opts = EncryptOptions {
-        recipients,
-        signer,
-    };
+    let opts = EncryptOptions { recipients, signer };
     format::encrypt(&opts, &mut &data[..], &mut out, |_| {}).expect("encrypt");
     out
 }
@@ -64,8 +61,14 @@ fn any_recipient_can_open_a_multi_recipient_file() {
     let rs = [a.to_recipient().unwrap(), b.to_recipient().unwrap()];
     let sealed = seal(b"team secret", &rs, None);
 
-    assert_eq!(open(&sealed, std::slice::from_ref(&a)).unwrap(), b"team secret");
-    assert_eq!(open(&sealed, std::slice::from_ref(&b)).unwrap(), b"team secret");
+    assert_eq!(
+        open(&sealed, std::slice::from_ref(&a)).unwrap(),
+        b"team secret"
+    );
+    assert_eq!(
+        open(&sealed, std::slice::from_ref(&b)).unwrap(),
+        b"team secret"
+    );
     // A non-recipient must not.
     assert!(open(&sealed, std::slice::from_ref(&c)).is_err());
 }
@@ -240,7 +243,10 @@ fn header_whitespace_malleability_is_rejected() {
     crlf.extend_from_slice(&sealed[..nl]);
     crlf.push(b'\r');
     crlf.extend_from_slice(&sealed[nl..]);
-    assert!(open(&crlf, std::slice::from_ref(&id)).is_err(), "CR must be rejected");
+    assert!(
+        open(&crlf, std::slice::from_ref(&id)).is_err(),
+        "CR must be rejected"
+    );
 }
 
 #[test]

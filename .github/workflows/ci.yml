@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  engine:
+    name: engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Cargo.lock is committed because this workspace ships a binary, so the
+      # build must be reproducible. --locked makes CI fail rather than quietly
+      # resolve something different from what was reviewed.
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-features --release
+
+      # The point of the whole exercise: a signature must be checkable by
+      # someone holding no key at all. If that ever stops being true, it stops
+      # here rather than in a user's hands.
+      - name: Keyless verification works end to end
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(mktemp -d)"
+          BIN=target/release/anubis
+          "$BIN" keygen --name ci --json > /dev/null
+          KEY=$("$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["identities"][0]["recipient"])')
+          echo "ci canary" > plain.txt
+          "$BIN" encrypt --json -r "$KEY" --sign --identity ci -o sealed.anubis plain.txt > /dev/null
+
+          # Destroy every private key. Decrypt must now fail and verify must not.
+          rm -rf "$HOME/.config/anubis/identities"
+          if "$BIN" decrypt -o /dev/null sealed.anubis 2>/dev/null; then
+            echo "decrypt succeeded without any identity"; exit 1
+          fi
+          "$BIN" verify sealed.anubis
+          "$BIN" verify --signer "$("$BIN" verify --json sealed.anubis | python3 -c 'import json,sys; print(json.load(sys.stdin)["signer_fingerprint"])')" sealed.anubis
+
+          # A dashless pin is the same pin.
+          FP=$("$BIN" verify --json sealed.anubis | python3 -c 'import json,sys; print(json.load(sys.stdin)["signer_fingerprint"].replace("-",""))')
+          "$BIN" verify --signer "$FP" sealed.anubis
+
+          # Exactly one JSON object on stdout, including on failure.
+          python3 - <<'EOF'
+          import json, subprocess, sys
+          out = subprocess.run(["target/release/anubis","verify","--json","plain.txt"],
+                               capture_output=True, text=True).stdout.strip()
+          assert out, "no JSON emitted"
+          json.loads(out)  # raises if more than one document
+          print("single JSON object on failure: ok")
+          EOF
+
+          # Tampering is caught.
+          python3 -c "
+          b = bytearray(open('sealed.anubis','rb').read()); b[-100] ^= 1
+          open('tampered.anubis','wb').write(bytes(b))"
+          if "$BIN" verify tampered.anubis 2>/dev/null; then
+            echo "tampered container verified"; exit 1
+          fi
+          echo "keyless verification: ok"
+
+      # The independent verifier must agree with the reference implementation,
+      # or one of the two is wrong and the specification cannot be trusted.
+      - name: Independent OpenSSL verifier agrees
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl version
+          sh docs/verify/openssl-verify.sh sealed.anubis
+          if sh docs/verify/openssl-verify.sh tampered.anubis 2>/dev/null; then
+            echo "OpenSSL verifier accepted a tampered container"; exit 1
+          fi
+          echo "independent verifier agrees: ok"
+
+  desktop:
+    name: desktop app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Qt 6
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build qt6-base-dev qt6-declarative-dev \
+            libqt6svg6-dev qt6-declarative-dev-tools desktop-file-utils
+
+      - name: Build
+        run: |
+          cmake -S desktop -B desktop/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build desktop/build
+
+      - name: Lint QML
+        run: |
+          qmllint6 -I desktop/build --qmldirs desktop/build/Anubis desktop/qml/*.qml \
+            || qmllint -I desktop/build --qmldirs desktop/build/Anubis desktop/qml/*.qml
+
+      - name: Validate desktop entry
+        run: desktop-file-validate desktop/packaging/dev.anubis.Vault.desktop

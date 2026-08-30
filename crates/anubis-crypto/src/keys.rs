@@ -106,8 +106,7 @@ impl Recipient {
 
     /// Encode as `anubis1...`.
     pub fn encode(&self) -> Result<String> {
-        let hrp = Hrp::parse(HRP_RECIPIENT)
-            .map_err(|e| Error::Key(format!("bad hrp: {e}")))?;
+        let hrp = Hrp::parse(HRP_RECIPIENT).map_err(|e| Error::Key(format!("bad hrp: {e}")))?;
         bech32::encode_lower::<Bech32mUnlimited>(hrp, &self.to_payload())
             .map_err(|e| Error::Key(format!("bech32 encode failed: {e}")))
     }
@@ -229,8 +228,7 @@ impl Identity {
     /// secret and every keygen and key load would otherwise leave a copy in
     /// freed heap.
     pub fn encode(&self) -> Result<String> {
-        let hrp = Hrp::parse(HRP_IDENTITY)
-            .map_err(|e| Error::Key(format!("bad hrp: {e}")))?;
+        let hrp = Hrp::parse(HRP_IDENTITY).map_err(|e| Error::Key(format!("bad hrp: {e}")))?;
         let payload = Zeroizing::new(self.to_payload());
         bech32::encode_upper::<Bech32mUnlimited>(hrp, &payload)
             .map_err(|e| Error::Key(format!("bech32 encode failed: {e}")))

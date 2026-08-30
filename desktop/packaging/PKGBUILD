@@ -1,7 +1,7 @@
 # Maintainer: Anubis Quantum Cipher <https://github.com/AnubisQuantumCipher>
 
 pkgname=anubis-desktop
-pkgver=2.0.0
+pkgver=2.1.0
 pkgrel=1
 pkgdesc="Post-quantum file encryption vault -- desktop front end for the ANUBIS engine"
 arch=('x86_64' 'aarch64')

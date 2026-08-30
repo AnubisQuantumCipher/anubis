@@ -13,7 +13,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
-use crate::keys::{Identity, Recipient, MLKEM_CT_LEN, X25519_PUB_LEN};
+use crate::keys::{Identity, MLKEM_CT_LEN, Recipient, X25519_PUB_LEN};
 
 /// Length of the derived key-wrapping key.
 pub const WRAP_KEY_LEN: usize = 32;
@@ -61,7 +61,6 @@ pub struct Encapsulation {
     pub wrap_key: Zeroizing<[u8; WRAP_KEY_LEN]>,
 }
 
-
 /// Encapsulate to a recipient, producing a fresh wrap key.
 pub fn encapsulate(recipient: &Recipient) -> Result<Encapsulation> {
     // Classical half: ephemeral X25519.
@@ -78,8 +77,7 @@ pub fn encapsulate(recipient: &Recipient) -> Result<Encapsulation> {
     // Post-quantum half: ML-KEM-1024.
     let ek = recipient.mlkem_key()?;
     let mut m = [0u8; 32];
-    getrandom::fill(&mut m)
-        .map_err(|e| Error::Key(format!("system entropy unavailable: {e}")))?;
+    getrandom::fill(&mut m).map_err(|e| Error::Key(format!("system entropy unavailable: {e}")))?;
     let (ct, mlkem_ss) = ek.encapsulate_deterministic(&ml_kem::array::Array(m));
     m.zeroize();
 

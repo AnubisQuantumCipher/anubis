@@ -32,7 +32,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
 use crate::hybrid;
-use crate::keys::{Identity, Recipient, MLDSA_VK_LEN, MLKEM_CT_LEN, X25519_PUB_LEN};
+use crate::keys::{Identity, MLDSA_VK_LEN, MLKEM_CT_LEN, Recipient, X25519_PUB_LEN};
 use crate::stream;
 
 /// First line of every ANUBIS/v3 file.
@@ -184,7 +184,9 @@ impl Header {
             // spaces or a CR would survive into the file while parsing to the
             // same values, making the header malleable.
             if !line.ends_with('\n') {
-                return Err(Error::Header("header line is not newline-terminated".into()));
+                return Err(Error::Header(
+                    "header line is not newline-terminated".into(),
+                ));
             }
             let content = &line[..line.len() - 1];
             if content.len() != content.trim_end().len() {
@@ -304,9 +306,7 @@ impl Header {
                     // is exactly the mistaken-identity outcome this format
                     // spends a fingerprint namespace to prevent.
                     if verifying_key.is_some() {
-                        return Err(Error::Header(
-                            "more than one mldsa87 stanza".into(),
-                        ));
+                        return Err(Error::Header("more than one mldsa87 stanza".into()));
                     }
                     if stanzas.is_empty() {
                         return Err(Error::Header(
@@ -474,7 +474,6 @@ pub struct Decrypted {
     pub verified_key: Option<Vec<u8>>,
 }
 
-
 /// Size of the payload region, given the whole container and its overhead.
 ///
 /// Split out so it can be proved rather than transcribed: `header_len` is
@@ -521,7 +520,13 @@ where
     W: Write,
     F: FnMut(u64),
 {
-    decrypt_impl(identities, reader, Bound::Known(total_len), writer, progress)
+    decrypt_impl(
+        identities,
+        reader,
+        Bound::Known(total_len),
+        writer,
+        progress,
+    )
 }
 
 /// Decrypt from a stream of unknown length, such as stdin.
@@ -922,9 +927,9 @@ pub fn verify_unsized<R: Read>(reader: R) -> Result<Verification> {
         hasher.update(&window[..n]);
         payload += n as u64;
     }
-    let sig_bytes = delay.take_tail().ok_or_else(|| {
-        Error::Integrity("signature trailer is truncated".into())
-    })?;
+    let sig_bytes = delay
+        .take_tail()
+        .ok_or_else(|| Error::Integrity("signature trailer is truncated".into()))?;
 
     if payload < stream::TAG as u64 {
         return Err(Error::Integrity("file is truncated".into()));
@@ -942,8 +947,8 @@ pub fn verify_unsized<R: Read>(reader: R) -> Result<Verification> {
 /// Shared by the sized and unsized paths so there is exactly one place where a
 /// signature is judged, and no way for the two to drift apart.
 fn check_signature(vk_bytes: &[u8], sig_bytes: &[u8], hasher: Sha512) -> Result<()> {
-    let vk_arr = Array::try_from(vk_bytes)
-        .map_err(|_| Error::Header("bad verifying key length".into()))?;
+    let vk_arr =
+        Array::try_from(vk_bytes).map_err(|_| Error::Header("bad verifying key length".into()))?;
     let vk = VerifyingKey::<MlDsa87>::decode(&vk_arr);
     let sig_arr =
         Array::try_from(sig_bytes).map_err(|_| Error::Integrity("bad signature length".into()))?;
@@ -961,7 +966,11 @@ fn check_signature(vk_bytes: &[u8], sig_bytes: &[u8], hasher: Sha512) -> Result<
 /// The callback receives a running count of payload bytes consumed, so a
 /// caller can show progress while checking a container too large to sit in
 /// memory.
-pub fn verify_with_progress<R, F>(reader: R, total_len: u64, mut progress: F) -> Result<Verification>
+pub fn verify_with_progress<R, F>(
+    reader: R,
+    total_len: u64,
+    mut progress: F,
+) -> Result<Verification>
 where
     R: Read,
     F: FnMut(u64),

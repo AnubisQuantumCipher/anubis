@@ -1,6 +1,6 @@
 # Security Policy and Threat Model
 
-ANUBIS 2.0.0
+ANUBIS 2.1.0
 
 This document states what ANUBIS is intended to guarantee, what those
 guarantees rest on, and what assurance the implementation actually carries. It
@@ -422,7 +422,7 @@ not claim otherwise.** They make different, defensible choices.
 | `age` / `rage` | X25519 | No | None (`rage` is pure Rust) |
 | GnuPG | RSA, or ECC including Curve25519 | No (classical algorithms) | libgcrypt and others |
 | `anubis-rage` 1.4.0 | X25519 + Kyber via liboqs | Yes | liboqs (C) |
-| ANUBIS 2.0.0 | X25519 + ML-KEM-1024, pure Rust | Yes | None |
+| ANUBIS 2.1.0 | X25519 + ML-KEM-1024, pure Rust | Yes | None |
 
 Accurate characterisations, to avoid the usual unfair comparisons:
 
@@ -621,8 +621,8 @@ support branches.
 and receive no security fixes. They could not be installed on Omarchy in the
 first place, because liboqs is not available; see `MIGRATION.md`. Migrate.
 
-ANUBIS 2.0.0 writes `anubis-encryption.org/v3`. Note that the wire format is
-v3 while the software is 2.0.0: the predecessor spent the v1 and v2 identifiers
+The 2.x line writes `anubis-encryption.org/v3`. Note that the wire format is
+v3 while the software is 2.x: the predecessor spent the v1 and v2 identifiers
 on two incompatible formats. `FORMAT.md` section 15 documents this.
 
 ---

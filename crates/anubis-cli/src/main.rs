@@ -244,10 +244,7 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
         signed: true,
         recipients: 0,
         error: None,
-        summary: format!(
-            "generated identity '{name}' ({})",
-            recipient.fingerprint()
-        ),
+        summary: format!("generated identity '{name}' ({})", recipient.fingerprint()),
     });
 
     if json {
@@ -311,7 +308,9 @@ fn all_identities() -> Result<Vec<(String, Identity)>> {
     if !dir.exists() {
         return Ok(out);
     }
-    let mut entries: Vec<_> = std::fs::read_dir(&dir)?.filter_map(std::result::Result::ok).collect();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(std::result::Result::ok)
+        .collect();
     entries.sort_by_key(std::fs::DirEntry::path);
     for e in entries {
         let p = e.path();
@@ -539,7 +538,16 @@ fn cmd_encrypt(
     })();
 
     let ms = started.elapsed().as_millis() as u64;
-    emit_result(json, "encrypt", &src.label(), Some(&sink.label()), sign, count, ms, result)
+    emit_result(
+        json,
+        "encrypt",
+        &src.label(),
+        Some(&sink.label()),
+        sign,
+        count,
+        ms,
+        result,
+    )
 }
 
 // ----------------------------------------------------------------- decrypt
@@ -680,12 +688,10 @@ fn cmd_decrypt(
                 // hash of a public key -- but a variable-time compare on a
                 // security decision is a thing reviewers rightly stop on.
                 let eq = want_n.len() == got_n.len()
-                    && bool::from(
-                        <[u8] as subtle::ConstantTimeEq>::ct_eq(
-                            want_n.as_bytes(),
-                            got_n.as_bytes(),
-                        ),
-                    );
+                    && bool::from(<[u8] as subtle::ConstantTimeEq>::ct_eq(
+                        want_n.as_bytes(),
+                        got_n.as_bytes(),
+                    ));
                 if !eq {
                     bail!("signed by {got}, not the pinned signer {want}");
                 }
@@ -754,8 +760,7 @@ fn read_armored<R: Read>(head: &[u8], reader: &mut R) -> Result<Vec<u8>> {
     if rest.len() > CAP {
         bail!("armored input exceeds {CAP} bytes; use binary for large files");
     }
-    let text = String::from_utf8(rest)
-        .map_err(|_| anyhow!("armored input is not valid UTF-8"))?;
+    let text = String::from_utf8(rest).map_err(|_| anyhow!("armored input is not valid UTF-8"))?;
     anubis_crypto::armor::decode(&text).map_err(|e| anyhow!("{e}"))
 }
 
@@ -825,25 +830,25 @@ fn emit_result_signed(
                 println!(
                     "{}",
                     json!({"kind":"result","op":op,"ok":true,
-                           "path":input,
-                           "out":out,
-                           "bytes":bytes,"ms":ms,"signed":signed,
-                           "signer_fingerprint":signer,
-                           "recipients":recipients,"error":null,
-                           // A successful decrypt means the header MAC verified;
-                           // reaching this point is only possible after that check.
-                           "header_mac_ok": if op == "decrypt" { json!(true) } else { json!(null) },
-                           // And the same reasoning for the signature: a signed
-                           // container cannot decrypt successfully unless its
-                           // signature verified first. Unsigned stays null --
-                           // nothing was checked, so nothing passed -- and
-                           // encrypt stays null because making a signature is
-                           // not checking one.
-                           "signature_ok": if op == "decrypt" && signed {
-                               json!(true)
-                           } else {
-                               json!(null)
-                           }})
+                    "path":input,
+                    "out":out,
+                    "bytes":bytes,"ms":ms,"signed":signed,
+                    "signer_fingerprint":signer,
+                    "recipients":recipients,"error":null,
+                    // A successful decrypt means the header MAC verified;
+                    // reaching this point is only possible after that check.
+                    "header_mac_ok": if op == "decrypt" { json!(true) } else { json!(null) },
+                    // And the same reasoning for the signature: a signed
+                    // container cannot decrypt successfully unless its
+                    // signature verified first. Unsigned stays null --
+                    // nothing was checked, so nothing passed -- and
+                    // encrypt stays null because making a signature is
+                    // not checking one.
+                    "signature_ok": if op == "decrypt" && signed {
+                        json!(true)
+                    } else {
+                        json!(null)
+                    }})
                 );
             } else {
                 // Attribution matters: "signature verified" without naming the
@@ -952,10 +957,11 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
             println!("signer:      {}", anubis_crypto::keys::fingerprint(k));
         }
         println!("header:      {} bytes", info.header_bytes);
-        println!("payload:     {} bytes in {} chunks", info.payload_bytes, info.chunks);
         println!(
-            "\nHeader authenticity is only verifiable with a key; run decrypt to check it."
+            "payload:     {} bytes in {} chunks",
+            info.payload_bytes, info.chunks
         );
+        println!("\nHeader authenticity is only verifiable with a key; run decrypt to check it.");
         if info.signed {
             println!(
                 "The signature is present but NOT checked here; run `anubis verify` to check it."
@@ -1103,17 +1109,19 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
     } else {
         println!("signature:   VALID (ML-DSA-87)");
         println!("signer:      {}", fp.as_deref().unwrap_or("--"));
-        println!("payload:     {} bytes in {} chunks", info.payload_bytes, info.chunks);
+        println!(
+            "payload:     {} bytes in {} chunks",
+            info.payload_bytes, info.chunks
+        );
         if let Some(want) = want_signer {
-            println!("pinned:      {}", if pin_ok { "MATCHES" } else { "MISMATCH" });
+            println!(
+                "pinned:      {}",
+                if pin_ok { "MATCHES" } else { "MISMATCH" }
+            );
             let _ = want;
         }
-        println!(
-            "\nA valid signature proves the holder of that key produced these exact"
-        );
-        println!(
-            "bytes. It does not say who that is: compare the fingerprint against a"
-        );
+        println!("\nA valid signature proves the holder of that key produced these exact");
+        println!("bytes. It does not say who that is: compare the fingerprint against a");
         println!("value you confirmed out of band.");
     }
 
@@ -1207,8 +1215,14 @@ fn cmd_status(json: bool) -> Result<()> {
         println!("ANUBIS {}", env!("CARGO_PKG_VERSION"));
         println!("suite:       {SUITE_KEM} / {SUITE_SIG} / {SUITE_AEAD}");
         println!("format:      {}", format::MAGIC);
-        println!("identities:  {}", obj["identities"].as_array().map_or(0, Vec::len));
-        println!("recipients:  {}", obj["recipients"].as_array().map_or(0, Vec::len));
+        println!(
+            "identities:  {}",
+            obj["identities"].as_array().map_or(0, Vec::len)
+        );
+        println!(
+            "recipients:  {}",
+            obj["recipients"].as_array().map_or(0, Vec::len)
+        );
         println!("operations:  {enc} encrypted, {dec} decrypted, {failed} failed");
     }
     Ok(())
