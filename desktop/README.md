@@ -10,6 +10,8 @@ its own. The plugin ([`../plugin/khephri.anubis`](../plugin/khephri.anubis)) is
 now a bar readout that hands every state-changing operation to this
 application.
 
+![The cockpit: identity vault and address book on the left, operation console and container inspector in the centre, ledger and audit timeline on the right](../docs/screenshots/vault.png)
+
 ```
 CMakeLists.txt      build, install rules
 install.sh          build + install + refresh desktop databases
@@ -181,6 +183,8 @@ exactly the mistaken-identity error the fingerprint exists to prevent.
 - **Neutral** covers *unknown* and *not applicable*, including a container from
   an older, unsupported wire format. An old file is not a tampered file.
 
+![After a decrypt: completed with size, time and throughput; HEADER MAC VERIFIED BY DECRYPT; SIGNED with the signer fingerprint](../docs/screenshots/decrypt-verified.png)
+
 ### The header MAC
 
 `anubis inspect` always reports `header_mac_ok: null`, and that is by design:
@@ -196,6 +200,8 @@ happened, not about the file's general trustworthiness. It is session state and
 is never persisted.
 
 ## Settings
+
+<img src="../docs/screenshots/settings.png" alt="The settings sheet: engine and surface options, and the SHORTCUTS legend" width="560" align="right">
 
 `Ctrl+,`, or the gear in the header. Written to
 `~/.config/anubis/desktop.json`, which is watched: an edit made in a text
@@ -282,6 +288,8 @@ that exists and cannot be decrypted.
 - Refusals are shown verbatim, and pre-flight refusals happen before any
   subprocess is spawned.
 - Overwriting an existing file always takes a second, explicit click.
+
+  ![The overwrite gate: the output already exists, so the console offers overwrite it / cancel instead of proceeding](../docs/screenshots/overwrite-gate.png)
 - Quitting while an operation runs is asked about, not assumed; the prompt says
   what will be left on disk.
 - The assurance line is pinned outside every scroll area, because it is the

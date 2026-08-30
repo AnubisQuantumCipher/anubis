@@ -2,6 +2,8 @@
 
 The Omarchy bar surface for **ANUBIS** — post-quantum file encryption.
 
+<img src="https://raw.githubusercontent.com/AnubisQuantumCipher/anubis/main/docs/screenshots/bar-plugin.png" alt="The dropdown: identity fingerprints, recent operations, Open ANUBIS Vault" width="420" align="right">
+
 A compact bar indicator and a bar-anchored dropdown. The plugin reads the
 `anubis` engine's JSON and draws it. It holds no key material, derives no
 secret, performs no cryptography, and reaches no verification verdict of its

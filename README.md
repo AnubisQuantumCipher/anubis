@@ -18,6 +18,8 @@ One repository, three surfaces:
 | `desktop/` | **ANUBIS Vault**, the standalone Qt 6 desktop application |
 | `plugin/` | `khephri.anubis`, the Omarchy bar readout |
 
+![The ANUBIS Vault cockpit: identity vault, operation console with a signed container inspected, ledger and audit timeline](docs/screenshots/vault.png)
+
 ---
 
 ## What it is
@@ -417,6 +419,8 @@ reads its JSON, and draws it; it holds no key material and reaches no
 verification verdict of its own. One instance: opening a container from a file
 manager hands the path to the vault already running.
 
+![Decrypt completed at 253 MiB/s; the inspector promotes the header MAC to VERIFIED BY DECRYPT and attributes the ML-DSA-87 signature](docs/screenshots/decrypt-verified.png)
+
 It is documented in [`desktop/README.md`](desktop/README.md) and installed
 with `desktop/install.sh`, which also registers the
 `application/vnd.anubis.container` MIME type (so sealed files carry their own
@@ -433,6 +437,8 @@ the app for -- engine state, identity and recipient fingerprints, recent
 operations -- and hand you the app for everything else. It performs no
 operation of its own; everything that changes state lives in the desktop
 application, one click away.
+
+<img src="docs/screenshots/bar-plugin.png" alt="The bar dropdown: identity fingerprints, recent operations, and a button that opens the vault" width="420" align="right">
 
 Until v2.0.0 the plugin carried a full-screen cockpit near-identical to the
 application's. Two copies of one honesty-audited surface with nothing keeping
