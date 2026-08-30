@@ -14,9 +14,19 @@ SRC_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SRC_DIR/build"
 
 echo "==> building"
-cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$PREFIX" >/dev/null
+configure() {
+  cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" >/dev/null
+}
+# Qt's OpenGL probe (WrapOpenGL) has been observed to fail spuriously on the
+# very first configure in a fresh build directory and then succeed unchanged
+# on the next run. One guarded retry keeps that flake from reading as a
+# broken package; a real configuration error still fails, twice and loudly.
+if ! configure; then
+  echo "==> configure failed; retrying once"
+  configure
+fi
 cmake --build "$BUILD_DIR" --parallel
 
 echo "==> installing to $PREFIX"
