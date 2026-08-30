@@ -134,7 +134,12 @@ jobs:
 
       - name: Lint QML
         run: |
-          qmllint -I desktop/build --qmldirs desktop/build/Anubis desktop/qml/*.qml
+          # Arch installs the Qt 6 tools under /usr/lib/qt6/bin and does not
+          # always put them on PATH; resolve rather than assume.
+          QMLLINT=$(command -v qmllint6 || command -v qmllint || true)
+          [ -n "$QMLLINT" ] || QMLLINT=/usr/lib/qt6/bin/qmllint
+          "$QMLLINT" --version
+          "$QMLLINT" -I desktop/build --qmldirs desktop/build/Anubis desktop/qml/*.qml
 
       - name: Validate desktop entry and AppStream metadata
         run: |
