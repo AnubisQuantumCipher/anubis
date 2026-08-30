@@ -14,6 +14,11 @@
 *.key
 *.age
 
+# The pattern above matches DIRECTORY names too, and the Omarchy plugin
+# directory is called khephri.anubis. Without this negation the entire
+# plugin silently vanishes from the repository.
+!plugin/khephri.anubis/
+
 # Belt and braces: the on-disk key encodings, in case a key is ever written
 # somewhere with an unexpected extension.
 *.identity
@@ -26,6 +31,10 @@ anubis-recipient-*
 *.plain
 *.decrypted
 *.out.tmp
+
+# Python bytecode (the Nautilus extension is Python)
+__pycache__/
+*.pyc
 
 # Editors and tooling
 *.swp
@@ -46,11 +55,11 @@ Thumbs.db
 tarpaulin-report.html
 
 # Packaging build products (packaging/PKGBUILD itself is committed)
-packaging/*.pkg.tar.zst
-packaging/*.pkg.tar.xz
-packaging/*.tar.gz
-packaging/src/
-packaging/pkg/
+**/packaging/*.pkg.tar.zst
+**/packaging/*.pkg.tar.xz
+**/packaging/*.tar.gz
+**/packaging/src/
+**/packaging/pkg/
 
 # Local shell.json backups written by install.sh, if run inside the checkout
 shell.json.bak.*

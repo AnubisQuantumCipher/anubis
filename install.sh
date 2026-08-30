@@ -104,7 +104,43 @@ if [ -d "${IDENTITY_DIR}" ]; then
         -exec chmod 0600 {} + 2>/dev/null || true
 fi
 
-# ---------------------------------------------------------------- bar widget
+# ---------------------------------------------------------------- bar plugin
+
+step "Installing Omarchy bar plugin (${WIDGET_ID})"
+
+# The plugin files ship in this repository. Registering a widget whose files
+# were never installed produces a silently dead bar entry, which is exactly
+# what a fresh machine used to get; the copy has to come first.
+PLUGIN_SRC="${SRC_DIR}/plugin/${WIDGET_ID}"
+PLUGIN_DST="${HOME}/.config/omarchy/plugins/${WIDGET_ID}"
+
+install_plugin_files() {
+    if [ ! -d "${PLUGIN_SRC}" ]; then
+        warn "plugin source ${PLUGIN_SRC} not found; skipping plugin install"
+        return 0
+    fi
+    if [ ! -d "${HOME}/.config/omarchy" ]; then
+        warn "~/.config/omarchy not found (Omarchy not installed?); skipping plugin install"
+        return 0
+    fi
+    mkdir -p "${PLUGIN_DST}"
+    # Plain files at the top level only; the plugin has no subdirectories, and
+    # copying blindly would sweep along editor droppings if any appear.
+    for f in "${PLUGIN_SRC}"/*; do
+        [ -f "${f}" ] || continue
+        cp -f "${f}" "${PLUGIN_DST}/"
+    done
+    say "plugin files: ${PLUGIN_DST}"
+}
+
+install_plugin_files
+
+# Registration is gated on the files actually being there. Registering a
+# widget whose files are absent is precisely the silently-dead bar entry the
+# copy above exists to prevent.
+if [ ! -f "${PLUGIN_DST}/manifest.json" ]; then
+    warn "plugin not installed; skipping widget registration"
+else
 
 step "Registering Omarchy bar widget (${WIDGET_ID})"
 
@@ -178,6 +214,8 @@ if command -v omarchy-shell >/dev/null 2>&1; then
     omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
     say "requested plugin rescan"
 fi
+
+fi # plugin installed
 
 # ---------------------------------------------------------------- next steps
 

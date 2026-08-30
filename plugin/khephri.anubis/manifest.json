@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "khephri.anubis",
+  "name": "ANUBIS",
+  "version": "3.0.0",
+  "author": "Anubis Quantum Cipher",
+  "license": "MIT OR Apache-2.0",
+  "description": "Post-quantum vault readout: engine state, your key fingerprints, and recent operations. Every action lives in the ANUBIS Vault desktop app.",
+  "tags": ["security", "encryption", "post-quantum", "pqc"],
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "ANUBIS",
+    "description": "Vault state at a glance; click for the readout, or open the desktop cockpit.",
+    "category": "Security",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "pollIntervalSec": 30,
+      "defaultIdentity": ""
+    },
+    "schema": [
+      {
+        "key": "pollIntervalSec",
+        "type": "integer",
+        "label": "Status poll interval (seconds)",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often `anubis status --json` is re-read."
+      },
+      {
+        "key": "defaultIdentity",
+        "type": "string",
+        "label": "Default identity",
+        "defaultValue": "",
+        "description": "Identity shown as in use when the engine lists more than one. Empty means the first the engine reports."
+      }
+    ]
+  }
+}
