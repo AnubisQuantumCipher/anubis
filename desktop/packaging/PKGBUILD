@@ -24,7 +24,7 @@ makedepends=('cmake' 'ninja')
 # The desktop application lives in the desktop/ directory of the engine's
 # repository and releases with it, under the same tag.
 source=("anubis-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('5e39458624363faae16e2998071faeb45768d94d9140267c96896e0e9e8e7257')
+sha256sums=('d13cd9959b2282283676f1206a1d3fbc608391a65b17db14a47292db4a107ba6')
 
 build() {
   cmake -S "${srcdir}/anubis-${pkgver}/desktop" -B build -G Ninja \
