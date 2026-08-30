@@ -1,0 +1,63 @@
+# Rust build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo
+# Cargo.lock IS committed: this workspace ships a binary, so builds must be
+# reproducible and dependency advisories must map to exact versions.
+
+# ANUBIS encrypted files and key material.
+# Never commit either. Identity files are secrets: one leaked identity is both
+# decrypt and sign capability, with no partial compromise and no recovery.
+*.anubis
+*.key
+*.age
+
+# Belt and braces: the on-disk key encodings, in case a key is ever written
+# somewhere with an unexpected extension.
+*.identity
+identities/
+ANUBIS-SECRET-KEY-*
+anubis-recipient-*
+
+# Test and scratch artifacts that may contain plaintext
+/tmp
+*.plain
+*.decrypted
+*.out.tmp
+
+# Editors and tooling
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Coverage and profiling
+*.profraw
+*.profdata
+/coverage
+tarpaulin-report.html
+
+# Packaging build products (packaging/PKGBUILD itself is committed)
+packaging/*.pkg.tar.zst
+packaging/*.pkg.tar.xz
+packaging/*.tar.gz
+packaging/src/
+packaging/pkg/
+
+# Local shell.json backups written by install.sh, if run inside the checkout
+shell.json.bak.*
+
+# Scratch verification output, machine-local
+/out
+
+# Desktop app build tree
+desktop/build/
+.qmlls.ini

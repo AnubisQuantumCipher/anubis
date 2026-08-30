@@ -1,0 +1,104 @@
+# Post-install messaging for the anubis package.
+#
+# Deliberately does not create directories, generate keys, or edit any user
+# configuration. Packaging scripts run as root; identity material and
+# per-user config belong to the user and are created on first use by the
+# tool itself. install.sh in the source tree is the opt-in path for the
+# Omarchy widget registration.
+
+_anubis_first_steps() {
+    cat <<'EOF'
+
+ANUBIS 2.0.0 installed.  Wire format ANUBIS/v3.
+
+  Generate an identity (decrypts and signs):
+      anubis keygen --name default
+
+  Encrypt, decrypt, inspect:
+      anubis encrypt -r anubis1... --sign file -o file.anubis
+      anubis decrypt --identity default file.anubis -o file
+      anubis inspect file.anubis
+      anubis status
+      anubis recipient add anubis1... --label alice
+
+  Directories are created on first use:
+      ~/.config/anubis/identities   identity files, mode 600 in a 700 dir
+      ~/.local/state/anubis         audit.jsonl, status.json
+
+Before encrypting anything real, verify your correspondent's recipient
+fingerprint (ANUBIS-FP) out of band.  A recipient is 2573 characters and
+cannot be checked by eye.
+
+ANUBIS has NOT had a third-party cryptographic audit.  It composes audited
+primitives rather than implementing them.  Read the threat model:
+      /usr/share/doc/anubis/SECURITY.md
+
+Back up your identity file.  Losing it means permanently losing access to
+everything encrypted to it.  There is no recovery and no escrow.
+
+EOF
+}
+
+post_install() {
+    _anubis_first_steps
+}
+
+post_upgrade() {
+    local _old="$2"
+
+    cat <<'EOF'
+
+ANUBIS upgraded.
+
+EOF
+
+    # Coming from the liboqs-based predecessor: keys and files are both
+    # incompatible and there is no in-place upgrade path.
+    if [ -n "${_old}" ]; then
+        case "${_old}" in
+            1.*)
+                cat <<'EOF'
+You upgraded from the 1.x (anubis-rage) line.  Old keys and old files are
+NOT compatible and cannot be converted:
+
+  * anubis-rage wrote formats anubis-encryption.org/v1 and /v2.
+    ANUBIS 2.0.0 writes /v3 and rejects both older formats.
+  * Old recipients also begin "anubis1" but decode to a different length,
+    so they are rejected rather than misread.
+  * Signing keys are now inside the identity; there is no separate file.
+
+Keep anubis-rage and your old identity until you have re-encrypted and
+verified everything.  Do not delete either yet.  Full procedure and a
+verified bulk migration script:
+
+      /usr/share/doc/anubis/MIGRATION.md
+
+EOF
+                ;;
+        esac
+    fi
+
+    cat <<'EOF'
+Check that your existing files still inspect cleanly:
+
+      anubis inspect FILE
+
+EOF
+}
+
+pre_remove() {
+    cat <<'EOF'
+
+Removing the anubis binary.
+
+Your keys and state are NOT removed, because removing them would make every
+file you have encrypted permanently unreadable:
+
+      ~/.config/anubis/          identities and recipients
+      ~/.local/state/anubis/     audit log and cached status
+
+Delete them yourself only if you are certain no encrypted file remains that
+you will ever need.  There is no recovery without the identity.
+
+EOF
+}

@@ -1,0 +1,92 @@
+# Maintainer: Anubis Quantum Cipher <https://github.com/AnubisQuantumCipher>
+
+pkgname=anubis
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Post-quantum file encryption with hybrid X25519+ML-KEM-1024 and ML-DSA-87 signatures"
+arch=('x86_64' 'aarch64')
+url="https://github.com/AnubisQuantumCipher/anubis"
+license=('MIT' 'Apache-2.0')
+
+# Genuinely none. Every cryptographic primitive is a pure-Rust implementation,
+# so the built binary links against nothing but libc. There is no liboqs, no
+# OpenSSL, and no cmake anywhere in the dependency graph.
+depends=()
+makedepends=('cargo')
+checkdepends=()
+optdepends=('jq: JSON output processing in shell pipelines'
+            'omarchy: full-screen khephri.anubis shell plugin')
+
+provides=('anubis')
+conflicts=('anubis-git' 'anubis-rage')
+replaces=('anubis-rage')
+
+install="${pkgname}.install"
+
+source=("${pkgname}-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "${pkgname}-${pkgver}"
+
+  # Vendor dependencies into the build directory and pin the offline registry,
+  # so build() and check() can run with --frozen and no network access.
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "${pkgname}-${pkgver}"
+
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+
+  cargo test --frozen --release --all-features
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+
+  install -Dm0755 "target/release/${pkgname}" -t "${pkgdir}/usr/bin/"
+
+  # Dual license: both texts are required by the terms of each.
+  install -Dm0644 LICENSE-MIT \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+  install -Dm0644 LICENSE-APACHE \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-APACHE"
+
+  install -Dm0644 README.md -t "${pkgdir}/usr/share/doc/${pkgname}/"
+  local _doc
+  for _doc in FORMAT SECURITY MIGRATION; do
+    if [[ -f "docs/${_doc}.md" ]]; then
+      install -Dm0644 "docs/${_doc}.md" -t "${pkgdir}/usr/share/doc/${pkgname}/"
+    fi
+  done
+
+  # Shell completions. `anubis completions <shell>` writes the script to stdout
+  # and exits non-zero on an unknown shell, so a failure here is a real
+  # packaging error and must fail the build rather than be swallowed. Earlier
+  # revisions probed for the subcommand and silently skipped when it was
+  # absent; it is present, so the probe only ever hid breakage.
+  local _bin="target/release/${pkgname}"
+  install -d "${pkgdir}/usr/share/bash-completion/completions" \
+             "${pkgdir}/usr/share/zsh/site-functions" \
+             "${pkgdir}/usr/share/fish/vendor_completions.d"
+  "${_bin}" completions bash > "${pkgdir}/usr/share/bash-completion/completions/${pkgname}"
+  "${_bin}" completions zsh  > "${pkgdir}/usr/share/zsh/site-functions/_${pkgname}"
+  "${_bin}" completions fish > "${pkgdir}/usr/share/fish/vendor_completions.d/${pkgname}.fish"
+  chmod 0644 "${pkgdir}/usr/share/bash-completion/completions/${pkgname}" \
+             "${pkgdir}/usr/share/zsh/site-functions/_${pkgname}" \
+             "${pkgdir}/usr/share/fish/vendor_completions.d/${pkgname}.fish"
+}
+
+# vim:set ts=2 sw=2 et:
