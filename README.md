@@ -10,6 +10,14 @@ on a stock Arch or Omarchy system with nothing but a Rust toolchain.
 Wire format `ANUBIS/v3`. Software version 2.0.0. Those numbers differ on
 purpose; see [Version numbering](#version-numbering).
 
+One repository, three surfaces:
+
+| | |
+|---|---|
+| `crates/` | the engine -- `anubis-crypto` and the `anubis` CLI |
+| `desktop/` | **ANUBIS Vault**, the standalone Qt 6 desktop application |
+| `plugin/` | `khephri.anubis`, the Omarchy bar readout |
+
 ---
 
 ## What it is
@@ -40,9 +48,22 @@ cd anubis
 ```
 
 `install.sh` builds with cargo, installs `anubis` to `~/.local/bin`, creates
-`~/.config/anubis/identities` at mode 700 and `~/.local/state/anubis`, and
-registers the Omarchy bar widget after backing up `shell.json`. It is
+`~/.config/anubis/identities` at mode 700 and `~/.local/state/anubis`, copies
+the `khephri.anubis` plugin files into `~/.config/omarchy/plugins/`, and
+registers the bar widget after backing up `shell.json` (registration needs
+`jq`; without it the manual one-line edit is printed instead). It is
 idempotent; re-running it only fills in what is missing.
+
+The desktop application installs separately -- it needs Qt 6, which the engine
+deliberately does not:
+
+```sh
+cd desktop && ./install.sh
+```
+
+See [`desktop/README.md`](desktop/README.md) for what that gives you: the app
+in the launcher, `.anubis` containers opening on double-click with their own
+icon, and Nautilus context-menu entries.
 
 Or, without the Omarchy integration:
 
@@ -55,6 +76,9 @@ Arch users can build a package from `packaging/PKGBUILD`:
 ```sh
 cd packaging && makepkg -si
 ```
+
+Note that the PKGBUILD builds the released `v2.0.0` tag fetched from GitHub --
+the standard Arch practice -- not whatever state your working tree is in.
 
 Ensure `~/.local/bin` is on your `PATH`. Shell completions are not installed by
 `install.sh`; generate them with `anubis completions <shell>` (see
@@ -383,17 +407,45 @@ none of the above.
 
 ---
 
+## Desktop application
+
+**ANUBIS Vault** (`desktop/`) is the GUI: a standalone Qt 6 application with a
+three-rail cockpit -- identities and the address book keyed by fingerprint, an
+operation console with live streaming progress and an overwrite gate, the
+container inspector, and the audit timeline. It spawns the `anubis` binary,
+reads its JSON, and draws it; it holds no key material and reaches no
+verification verdict of its own. One instance: opening a container from a file
+manager hands the path to the vault already running.
+
+It is documented in [`desktop/README.md`](desktop/README.md) and installed
+with `desktop/install.sh`, which also registers the
+`application/vnd.anubis.container` MIME type (so sealed files carry their own
+icon and open in the vault) and a Nautilus context-menu extension
+(*Encrypt with ANUBIS...*, *Encrypt to myself*, *Decrypt with ANUBIS*).
+
+---
+
 ## Omarchy plugin
 
-A full-screen Omarchy shell plugin, `khephri.anubis`, is the GUI. It shows
-identities with fingerprints, known recipients, recent operations from the
-audit stream, and drives encrypt and decrypt with live progress. It reads
-nothing but the documented `--json` surface, so the CLI remains the source of
-truth.
+The bar surface, `khephri.anubis` (`plugin/`), is a READOUT: a compact bar
+indicator and a dropdown that answer the questions you would otherwise open
+the app for -- engine state, identity and recipient fingerprints, recent
+operations -- and hand you the app for everything else. It performs no
+operation of its own; everything that changes state lives in the desktop
+application, one click away.
 
-`install.sh` registers the bar widget in `~/.config/omarchy/shell.json` by
-appending `khephri.anubis` to `bar.layout.right`, writing a timestamped backup
-first and skipping the edit if the entry is already present.
+Until v2.0.0 the plugin carried a full-screen cockpit near-identical to the
+application's. Two copies of one honesty-audited surface with nothing keeping
+them in sync is a defect waiting to happen, so the plugin was cut down to the
+one job a bar surface is good at. The old cockpit QML is archived under
+`desktop/reference/`.
+
+`install.sh` copies the plugin files into `~/.config/omarchy/plugins/` and
+registers the widget in `~/.config/omarchy/shell.json` by appending
+`khephri.anubis` to `bar.layout.right`, writing a timestamped backup first and
+skipping the edit if the entry is already present. Registration needs `jq` and
+an existing `shell.json`; when either is missing the installer prints the
+manual step rather than guessing at an edit.
 
 To register it manually, add to the `right` array in `bar.layout`:
 
@@ -409,33 +461,26 @@ omarchy-shell shell rescanPlugins
 
 ---
 
-## SIA integration
+## Audit stream
 
 ANUBIS appends one JSON object per operation to
 `~/.local/state/anubis/audit.jsonl`, an append-only stream in the same
 `{ts, op, path, out, bytes, ms, ok, signed, recipients, error}` shape that
 `anubis status --json` reports under `recent`.
 
-On this machine ANUBIS is a registered SIA organ. Two `custom_senses` entries in
-`~/.config/sia/config.json` tail that file, so encryption and decryption
-operations become part of the machine's recallable memory and are queryable
-alongside the other organs:
-
-```sh
-sia ask "what has anubis encrypted today"
-sia recall organs/anubis
-```
-
-If you are copying this pattern for another tool, one implementation detail is
-easy to get wrong: **SIA's `sense_custom` applies its match regex to the
-extracted field, not to the raw JSON line.** The success and failure senses
-therefore key on the extracted summary text, not on the `ok` boolean, because
-`ok` is never visible to the regex.
-
 No key material, no identity strings, no recipient secrets, and no plaintext
 ever enter the audit stream. It records paths, sizes, timings, and outcomes.
-That is deliberate: the stream is meant to be readable by another process, so it
-must contain nothing that would be dangerous to read.
+That is deliberate: the stream is meant to be readable by another process, so
+it must contain nothing that would be dangerous to read.
+
+The desktop application renders it as the audit timeline, and any log tailer
+can consume it. If you run [SIA](https://github.com/AnubisQuantumCipher/sia),
+the Omarchy machine-memory daemon, two `custom_senses` entries tailing that
+file make encryption operations part of the machine's recallable memory. One
+implementation detail is easy to get wrong: SIA's `sense_custom` applies its
+match regex to the *extracted field*, not to the raw JSON line, so key the
+success and failure senses on the extracted summary text -- the `ok` boolean
+is never visible to the regex.
 
 ---
 
@@ -588,7 +633,7 @@ documented above.
 
 ## Build from source
 
-Requires a Rust toolchain, edition 2024, Rust 1.98 or newer. Nothing else: no
+Requires a Rust toolchain, edition 2024, Rust 1.85 or newer. Nothing else: no
 C compiler, no CMake, no `pkg-config`, no system cryptographic library.
 
 ```sh
@@ -632,7 +677,6 @@ maps to an exact version. Keep dependencies current with `cargo update` and
 | `~/.config/anubis/identities/` | Identity files, mode 600 in a 700 directory |
 | `~/.config/anubis/recipients.toml` | Labelled recipients |
 | `~/.local/state/anubis/audit.jsonl` | Append-only operation log |
-| `~/.local/state/anubis/status.json` | Cached status for the GUI |
 | `~/.config/omarchy/plugins/khephri.anubis/` | Omarchy plugin |
 
 ---

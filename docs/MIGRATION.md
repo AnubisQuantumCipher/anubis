@@ -229,7 +229,7 @@ avoids this, because the file key derivation differs.
 anubis-rage --version
 
 # The new tool.
-cd ~/Projects/anubis && ./install.sh
+cd anubis && ./install.sh   # from wherever you cloned the repository
 anubis keygen --name default
 anubis status
 ```

@@ -23,7 +23,7 @@ ANUBIS 2.0.0 installed.  Wire format ANUBIS/v3.
 
   Directories are created on first use:
       ~/.config/anubis/identities   identity files, mode 600 in a 700 dir
-      ~/.local/state/anubis         audit.jsonl, status.json
+      ~/.local/state/anubis         audit.jsonl
 
 Before encrypting anything real, verify your correspondent's recipient
 fingerprint (ANUBIS-FP) out of band.  A recipient is 2573 characters and
@@ -95,7 +95,7 @@ Your keys and state are NOT removed, because removing them would make every
 file you have encrypted permanently unreadable:
 
       ~/.config/anubis/          identities and recipients
-      ~/.local/state/anubis/     audit log and cached status
+      ~/.local/state/anubis/     audit log
 
 Delete them yourself only if you are certain no encrypted file remains that
 you will ever need.  There is no recovery without the identity.

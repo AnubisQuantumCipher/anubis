@@ -8,10 +8,10 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/AnubisQuantumCipher/anubis"
 license=('MIT' 'Apache-2.0')
 
-# Genuinely none. Every cryptographic primitive is a pure-Rust implementation,
-# so the built binary links against nothing but libc. There is no liboqs, no
-# OpenSSL, and no cmake anywhere in the dependency graph.
-depends=()
+# Every cryptographic primitive is a pure-Rust implementation, so the built
+# binary links only the base toolchain runtime (libc and gcc_s). There is no
+# liboqs, no OpenSSL, and no cmake anywhere in the dependency graph.
+depends=('glibc' 'gcc-libs')
 makedepends=('cargo')
 checkdepends=()
 optdepends=('jq: JSON output processing in shell pipelines'

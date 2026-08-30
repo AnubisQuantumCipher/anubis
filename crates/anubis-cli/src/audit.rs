@@ -1,7 +1,7 @@
 //! The append-only operation log.
 //!
 //! Each line is one JSON object. The `summary` and `ok` fields exist so
-//! SIA, this machine's memory daemon, can tail the stream as a custom sense
+//! SIA, an external memory daemon such as SIA, can tail the stream as a custom sense
 //! and turn encryption activity into recallable memory. See the SIA section
 //! of the README.
 
