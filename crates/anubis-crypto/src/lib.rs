@@ -23,7 +23,10 @@ pub mod keys;
 pub mod stream;
 
 pub use error::{Error, Result};
-pub use format::{Decrypted, EncryptOptions, Header, Inspection, decrypt, encrypt, inspect};
+pub use format::{
+    Decrypted, EncryptOptions, Header, Inspection, Verification, decrypt, encrypt, inspect,
+    verify, verify_unsized, verify_with_progress,
+};
 pub use keys::{Identity, Recipient, fingerprint};
 
 /// Crate version, surfaced by the CLI.

@@ -91,6 +91,84 @@ Item {
     return p !== "" && macAttested[p] ? String(macAttested[p]) : ""
   }
 
+  // Signatures whose validity a `verify` in this session actually established,
+  // keyed by path. Same discipline as macAttested: the record of a check that
+  // ran, never persisted and never inferred. `inspect` reads the header only,
+  // so it can say a container is signed and can never say the signature is
+  // good; only this map may promote the chip.
+  property var sigAttested: ({})
+  readonly property bool verifyBusy: verifyProc.running
+
+  function sigAttestedFor(path) {
+    var p = String(path || "")
+    return p !== "" && sigAttested[p] ? sigAttested[p] : null
+  }
+
+  // Check a signature without a key. The signature covers a digest of the
+  // header and the payload ciphertext, and the verifying key travels in the
+  // header, so this decrypts nothing and needs no identity -- it works on a
+  // container addressed to somebody else.
+  function verifySignature(path) {
+    var p = Model.normalizePath(path, home)
+    if (p === "") return
+    if (engineMissing || enginePath === "") {
+      actionError = "The anubis engine is not installed."
+      return
+    }
+    if (verifyProc.running) return
+    actionError = ""
+    actionStatus = "Verifying signature..."
+    verifyProc.target = p
+    verifyProc.outText = ""
+    verifyProc.errText = ""
+    verifyProc.command = [enginePath, "verify", "--json", p]
+    verifyProc.running = true
+  }
+
+  function applyVerify(raw, stderrText, exitCode) {
+    var target = String(verifyProc.target || "")
+    var record = null
+    var lines = String(raw || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var o = Model.parseLine(lines[i])
+      if (o && o.kind === "verify") record = o
+    }
+    actionStatus = ""
+
+    if (target === "") return
+
+    if (record === null) {
+      // No verdict is not a verdict. Say the check could not be made rather
+      // than leaving a chip that implies one was.
+      actionError = stderrText !== "" ? stderrText
+        : "anubis exited " + exitCode + " without a verify record"
+      return
+    }
+
+    // Order matters. A verdict about the signature -- either way -- is what
+    // this map exists to hold, so it is read first. Only when the engine
+    // reached no verdict at all does the unsigned case apply; an unsigned
+    // container is not a failed signature and must not be recorded as one.
+    if (record.signature_ok !== true && record.signature_ok !== false) {
+      actionError = record.signed === true
+        ? String(record.error || "the signature could not be checked")
+        : "This container carries no signature."
+      return
+    }
+
+    var next = {}
+    for (var k in sigAttested) next[k] = sigAttested[k]
+    next[target] = {
+      ok: record.signature_ok === true,
+      at: new Date().toISOString(),
+      fingerprint: String(record.signer_fingerprint || ""),
+      error: String(record.error || "")
+    }
+    sigAttested = next
+    actionError = record.signature_ok === true ? ""
+      : String(record.error || "signature verification failed")
+  }
+
   // A request held back because the output already exists and the operator
   // asked to be warned. Null when nothing is pending.
   property var pendingOverwrite: null
@@ -107,6 +185,7 @@ Item {
   readonly property bool actionBusy: keygenProc.running || bookProc.running
 
   readonly property bool anyBusy: statusBusy || opBusy || inspectBusy || actionBusy
+    || verifyBusy
 
   signal operationFinished(string kind, bool ok)
   signal identityCreated(string name)
@@ -297,6 +376,24 @@ Item {
           for (var k in macAttested) next[k] = macAttested[k]
           next[target] = new Date().toISOString()
           macAttested = next
+        }
+      }
+      // A signed container cannot decrypt successfully unless its signature
+      // verified first, so a successful decrypt attests the signature on the
+      // same footing as the header MAC. Recording it here means the operator
+      // is not asked to re-verify by hand something the engine just checked.
+      if (o.ok === true && o.signature_ok === true) {
+        var sigTarget = String(o.path || opInput)
+        if (sigTarget !== "") {
+          var sigNext = {}
+          for (var sk in sigAttested) sigNext[sk] = sigAttested[sk]
+          sigNext[sigTarget] = {
+            ok: true,
+            at: new Date().toISOString(),
+            fingerprint: String(o.signer_fingerprint || ""),
+            error: ""
+          }
+          sigAttested = sigNext
         }
       }
     }
@@ -542,6 +639,26 @@ Item {
     onExited: function (code) {
       root.applyInspect(inspectProc.outText,
                         inspectProc.errText.replace(/^\s+|\s+$/g, ""), code)
+    }
+  }
+
+  Process {
+    id: verifyProc
+    property string target: ""
+    property string outText: ""
+    property string errText: ""
+    command: ["/usr/bin/true"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: verifyProc.outText = String(text || "")
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: verifyProc.errText = String(text || "")
+    }
+    onExited: function (code) {
+      root.applyVerify(verifyProc.outText,
+                       verifyProc.errText.replace(/^\s+|\s+$/g, ""), code)
     }
   }
 

@@ -87,6 +87,13 @@ enum Command {
     },
     /// Show a file's header without decrypting it.
     Inspect { input: PathBuf },
+    /// Check a file's signature. Needs no key and decrypts nothing.
+    Verify {
+        /// Require this exact signer fingerprint (ANUBIS-FP form).
+        #[arg(long)]
+        signer: Option<String>,
+        input: PathBuf,
+    },
     /// Summarise the vault.
     Status,
     /// Manage the recipient address book.
@@ -115,15 +122,35 @@ enum RecipientAction {
     },
 }
 
+/// A failure whose machine-readable record has already been printed.
+///
+/// `verify` emits one `kind:"verify"` object that carries the whole verdict,
+/// including the failure cases. Wrapping its error in this tells `main` to set
+/// the exit status without printing a second JSON object, so `--json verify`
+/// output is always exactly one document.
+#[derive(Debug)]
+struct VerifyFailed(anyhow::Error);
+
+impl std::fmt::Display for VerifyFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for VerifyFailed {}
+
 fn main() {
     let cli = Cli::parse();
     let json = cli.json;
     match run(&cli) {
         Ok(()) => {}
         Err(e) => {
+            let reported = e.downcast_ref::<VerifyFailed>().is_some();
             if json {
-                let obj = json!({"kind": "result", "ok": false, "error": e.to_string()});
-                println!("{obj}");
+                if !reported {
+                    let obj = json!({"kind": "result", "ok": false, "error": e.to_string()});
+                    println!("{obj}");
+                }
             } else {
                 eprintln!("anubis: {e:#}");
             }
@@ -172,6 +199,7 @@ fn run(cli: &Cli) -> Result<()> {
             input,
         ),
         Command::Inspect { input } => cmd_inspect(cli.json, input),
+        Command::Verify { signer, input } => cmd_verify(cli.json, signer.as_deref(), input),
         Command::Status => cmd_status(cli.json),
         Command::Recipient { action } => cmd_recipient(cli.json, action),
         Command::Completions { shell } => {
@@ -804,7 +832,18 @@ fn emit_result_signed(
                            "recipients":recipients,"error":null,
                            // A successful decrypt means the header MAC verified;
                            // reaching this point is only possible after that check.
-                           "header_mac_ok": if op == "decrypt" { json!(true) } else { json!(null) }})
+                           "header_mac_ok": if op == "decrypt" { json!(true) } else { json!(null) },
+                           // And the same reasoning for the signature: a signed
+                           // container cannot decrypt successfully unless its
+                           // signature verified first. Unsigned stays null --
+                           // nothing was checked, so nothing passed -- and
+                           // encrypt stays null because making a signature is
+                           // not checking one.
+                           "signature_ok": if op == "decrypt" && signed {
+                               json!(true)
+                           } else {
+                               json!(null)
+                           }})
                 );
             } else {
                 // Attribution matters: "signature verified" without naming the
@@ -897,6 +936,12 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
                 "payload_bytes": info.payload_bytes,
                 "chunks": info.chunks,
                 "header_mac_ok": null,
+                // Present but unchecked. Verifying costs a pass over the whole
+                // payload, which `inspect` deliberately does not do -- run
+                // `anubis verify` for an answer. Reporting null rather than
+                // omitting the field keeps "not checked here" distinguishable
+                // from "checked and passed".
+                "signature_ok": null,
             })
         );
     } else {
@@ -911,8 +956,185 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
         println!(
             "\nHeader authenticity is only verifiable with a key; run decrypt to check it."
         );
+        if info.signed {
+            println!(
+                "The signature is present but NOT checked here; run `anubis verify` to check it."
+            );
+        }
     }
     Ok(())
+}
+
+/// Does an operator-supplied fingerprint name this key?
+///
+/// Separators are cosmetic (FORMAT.md 11.4), so a pin typed without dashes is
+/// the same pin. The comparison is constant time: a fingerprint is a hash of a
+/// public key and leaks nothing, but a variable-time compare on a security
+/// decision is a thing reviewers rightly stop on, and `decrypt` has always
+/// done it this way. Both commands now call this, so they cannot drift.
+fn fp_matches(want: &str, got: &str) -> bool {
+    let want_n = want.trim().to_ascii_uppercase().replace('-', "");
+    let got_n = got.trim().to_ascii_uppercase().replace('-', "");
+    want_n.len() == got_n.len()
+        && bool::from(<[u8] as subtle::ConstantTimeEq>::ct_eq(
+            want_n.as_bytes(),
+            got_n.as_bytes(),
+        ))
+}
+
+// ------------------------------------------------------------------ verify
+
+/// Check a container's signature without a key.
+///
+/// The signature covers `SHA-512(header || payload ciphertext)` and the
+/// verifying key travels in the header, so this needs no identity and
+/// decrypts nothing. It is the command a third party runs on a container they
+/// cannot read, to establish that the holder of a particular ML-DSA-87 key
+/// produced these exact bytes.
+///
+/// Exit status is the answer: 0 only when a signature is present and valid.
+/// An unsigned container exits non-zero, because "nothing to check" is not a
+/// pass -- any recipient can strip a signature, so its absence says nothing
+/// about whether the sender signed.
+fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()> {
+    let src = io::Source::parse(input);
+
+    let mut probe = [0u8; 512];
+    let mut reader = src.open()?;
+    let n = fill(&mut reader, &mut probe)?;
+    let head = &probe[..n];
+
+    // Armor and pipes both have to be resolved to a known length first: the
+    // payload span is computed by subtracting the header and the fixed
+    // trailer from the total.
+    let info = if anubis_crypto::armor::looks_armored(head) {
+        let raw = read_armored(head, &mut reader)?;
+        let len = raw.len() as u64;
+        format::verify(&raw[..], len)
+    } else {
+        let joined = head.chain(reader);
+        match src.len() {
+            Some(len) => format::verify(joined, len),
+            // A pipe has no length. Stream it through the delay buffer rather
+            // than reading it into memory: this command is pointed at
+            // containers from strangers, and "buffer whatever arrives" is an
+            // unauthenticated memory-exhaustion invitation on exactly the
+            // input that deserves it least.
+            None => format::verify_unsized(joined),
+        }
+    };
+
+    let info = match info {
+        Ok(info) => info,
+        Err(e) => {
+            // Only a genuine signature mismatch may be reported as
+            // `signature_ok: false`. Every other failure -- a truncated file, a
+            // malformed header, an unreadable trailer -- means the check could
+            // not be MADE, which is `null`. Collapsing the two would let a
+            // damaged file be reported as a forged one, and would tell a reader
+            // something about the signer that nothing established.
+            let mismatch = matches!(e, anubis_crypto::Error::BadSignature);
+            if json {
+                // The verify record IS this command's result record; main must
+                // not print a second one after it. A consumer parsing stdout
+                // as one document would otherwise fail on exactly the outcomes
+                // this command exists to report.
+                println!(
+                    "{}",
+                    json!({
+                        "kind": "verify",
+                        "path": src.label(),
+                        "ok": false,
+                        // Reaching a signature mismatch at all proves a
+                        // verifying key was present, so `signed` is known here.
+                        "signed": if mismatch { Some(true) } else { None },
+                        "signature_ok": if mismatch { Some(false) } else { None },
+                        "error": e.to_string(),
+                    })
+                );
+            }
+            return Err(VerifyFailed(anyhow!("{e}")).into());
+        }
+    };
+
+    let fp = info
+        .verifying_key
+        .as_ref()
+        .map(|k| anubis_crypto::keys::fingerprint(k));
+
+    // Pinning is checked after the cryptography, and a mismatch is a failure
+    // even though the signature itself is sound: the caller asked whether a
+    // specific key signed this, and the answer is no.
+    let pin_ok = match (want_signer, fp.as_deref()) {
+        (None, _) => true,
+        (Some(want), Some(have)) => fp_matches(want, have),
+        (Some(_), None) => false,
+    };
+
+    let ok = info.signature_ok == Some(true) && pin_ok;
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "kind": "verify",
+                "path": src.label(),
+                "ok": ok,
+                "format": info.format,
+                "signed": info.signed,
+                "signature_ok": info.signature_ok,
+                "signer_fingerprint": fp,
+                "signer_pinned": want_signer,
+                "signer_matches": want_signer.map(|_| pin_ok),
+                "recipients": info.recipients,
+                "header_bytes": info.header_bytes,
+                "payload_bytes": info.payload_bytes,
+                "chunks": info.chunks,
+                // The header MAC is keyed from the file key, so this command
+                // -- which holds no key -- structurally cannot check it.
+                "header_mac_ok": null,
+            })
+        );
+    } else if !info.signed {
+        println!("signature:   ABSENT");
+        println!("\nThis container carries no signature. That is not the same as");
+        println!("unsigned-by-the-sender: any recipient can strip a signature, so");
+        println!("absence carries no information. Require one up front instead.");
+    } else {
+        println!("signature:   VALID (ML-DSA-87)");
+        println!("signer:      {}", fp.as_deref().unwrap_or("--"));
+        println!("payload:     {} bytes in {} chunks", info.payload_bytes, info.chunks);
+        if let Some(want) = want_signer {
+            println!("pinned:      {}", if pin_ok { "MATCHES" } else { "MISMATCH" });
+            let _ = want;
+        }
+        println!(
+            "\nA valid signature proves the holder of that key produced these exact"
+        );
+        println!(
+            "bytes. It does not say who that is: compare the fingerprint against a"
+        );
+        println!("value you confirmed out of band.");
+    }
+
+    // Exit status is derived from `ok` -- the same value the JSON reports --
+    // so the two can never disagree. Deriving it from `signed` instead would
+    // key success on a signature being PRESENT rather than VALID, which is the
+    // precise confusion this command exists to end.
+    if ok {
+        return Ok(());
+    }
+    if !info.signed {
+        return Err(VerifyFailed(anyhow!("container is not signed")).into());
+    }
+    if !pin_ok {
+        return Err(VerifyFailed(anyhow!(
+            "signature is valid but by {}, not the pinned signer",
+            fp.as_deref().unwrap_or("an unknown key")
+        ))
+        .into());
+    }
+    Err(VerifyFailed(anyhow!("signature did not verify")).into())
 }
 
 // ------------------------------------------------------------------ status

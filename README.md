@@ -344,6 +344,7 @@ supplied it.
 | `anubis encrypt` | Encrypt to one or more recipients, optionally signing and armoring |
 | `anubis decrypt` | Decrypt with an identity; verifies any signature present |
 | `anubis inspect` | Report a file's format, stanzas, signer, and size without decrypting |
+| `anubis verify` | Check a signature. Needs no key, decrypts nothing, works on a container addressed to somebody else |
 | `anubis status` | Identities, known recipients, recent operations, counts |
 | `anubis recipient` | Address book: `list`, `add KEY --label L`, `remove --label L` |
 | `anubis completions` | Emit a completion script for `bash`, `zsh`, `fish`, `elvish`, or `powershell` |
@@ -356,16 +357,34 @@ Flags, in full:
 | `encrypt` | `-r/--recipient KEY_OR_LABEL` `-R/--recipients-file FILE` `--sign` `--identity NAME` `-a/--armor` `-o/--output PATH` `--force` |
 | `decrypt` | `--identity NAME` `-o/--output PATH` `--force` `--require-signature` `--signer FINGERPRINT` |
 | `inspect` | (no flags beyond `--json`) |
+| `verify` | `--signer FINGERPRINT` |
 | `status` | (no flags beyond `--json`) |
 | `recipient` | `list`, `add KEY --label L`, `remove --label L` |
 | `completions` | positional `SHELL` |
 
 `-r` and `-R` are both repeatable. A present signature is verified
-automatically on `decrypt`, so there is no verify flag; `--require-signature`
-and `--signer` add a policy on top of that, and `--signer` implies
-`--require-signature`. Armor is auto-detected on read, so there is no `--armor`
-on `decrypt` or `inspect`. `-` means stdin or stdout for `encrypt`, `decrypt`,
-and `inspect`.
+automatically on `decrypt`; `--require-signature` and `--signer` add a policy
+on top of that, and `--signer` implies `--require-signature`. Armor is
+auto-detected on read, so there is no `--armor` on `decrypt` or `inspect`. `-`
+means stdin or stdout for `encrypt`, `decrypt`, `inspect`, and `verify`.
+
+`verify` is the standalone check, and it needs **no key at all**: the
+signature covers a digest of the header and the payload ciphertext, and the
+verifying key travels in the header. So anyone holding the bytes can establish
+who produced them, including a third party who cannot decrypt the container
+and should not be able to. It streams, so a file larger than memory or
+arriving on a pipe is fine.
+
+```sh
+anubis verify report.anubis
+anubis verify --signer 95CF-CBCF-2895-445D-E4C0 report.anubis   # pin the signer
+```
+
+Exit `0` only when a signature is present **and** valid **and**, if pinned, by
+that signer. An unsigned container exits non-zero: any recipient can strip a
+signature, so "nothing to check" is not a pass. See
+[docs/VERIFYING.md](docs/VERIFYING.md) to do the same check with stock OpenSSL
+and no ANUBIS code at all.
 
 Every command accepts `--json` and emits single-line JSON objects on stdout.
 That surface is stable and is what the GUI consumes.
@@ -389,6 +408,16 @@ keys and are never interchangeable.
 decrypt: the header MAC key is derived from the file key, so only a recipient
 can verify it. Treat `null` as "not checked", never as "failed". A successful
 `decrypt --json` reports `header_mac_ok: true`.
+
+`inspect` reports `signature_ok` as `null` for the same reason in a different
+key: checking a signature means hashing the whole payload, which `inspect`
+does not do. `verify --json` emits exactly one `{"kind":"verify"}` object
+carrying `ok`, `signed`, `signature_ok`, `signer_fingerprint`,
+`signer_matches`, and the size fields. Its `signature_ok` is `true`, `false`,
+or `null`, and all three are distinct: `null` means the check could not be
+made -- unsigned, truncated, malformed -- and is never a pass and never a
+failure. `header_mac_ok` on a verify record is always `null`, because that
+command holds no key.
 
 Exit codes: `0` success, `1` operation failure (bad key, tamper detected,
 unsigned container under `--require-signature`, signer mismatch, armor over the
@@ -419,7 +448,13 @@ reads its JSON, and draws it; it holds no key material and reaches no
 verification verdict of its own. One instance: opening a container from a file
 manager hands the path to the vault already running.
 
-![Decrypt completed at 253 MiB/s; the inspector promotes the header MAC to VERIFIED BY DECRYPT and attributes the ML-DSA-87 signature](docs/screenshots/decrypt-verified.png)
+![Decrypt completed; the inspector promotes both the header MAC and the ML-DSA-87 signature, each with the time its check ran](docs/screenshots/decrypt-verified.png)
+
+Signature checking needs no key, so the vault offers it on a container it
+cannot open. Here the header MAC stays honestly undeterminable -- that one does
+need a key -- while the signature is verified anyway:
+
+![A container from a stranger: HEADER MAC NOT DETERMINABLE HERE beside SIGNATURE VERIFIED -- ML-DSA-87](docs/screenshots/verify-keyless.png)
 
 It is documented in [`desktop/README.md`](desktop/README.md) and installed
 with `desktop/install.sh`, which also registers the
@@ -658,6 +693,8 @@ Layout:
 crates/anubis-crypto/    library: format, primitives, key handling
 crates/anubis-cli/       binary `anubis`
 docs/FORMAT.md           wire format specification
+docs/VERIFYING.md        checking a signature without trusting this software
+docs/verify/             two independent verifiers (POSIX sh + OpenSSL; Python)
 docs/SECURITY.md         threat model and assurance statement
 docs/MIGRATION.md        migrating from anubis-rage 1.4.0
 packaging/PKGBUILD       Arch package

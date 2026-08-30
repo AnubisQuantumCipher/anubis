@@ -68,6 +68,14 @@ produced before the failure was detected. See section 9.
 
 ## 2. Cryptographic parameters
 
+> **One AEAD, and only one.** `ANUBIS/v3` encrypts payloads with
+> ChaCha20-Poly1305 and nothing else. There is no AES in this format, no
+> cipher negotiation, and no agility: the suite is fixed by the version line.
+> Earlier, unrelated crates published under the names `anubis-rage` and
+> `anubis-age` implement the superseded `v1`/`v2` formats and describe a
+> different construction; documentation generated from those crates does not
+> describe this format. Section 15 lists the identifiers already spent.
+
 | Parameter | Value | Reference |
 |---|---|---|
 | Classical KEM | X25519 | RFC 7748 |
@@ -222,6 +230,15 @@ A parser MUST reject: an unknown version line; a stanza tag other than
 `hybrid-x25519-mlkem1024` or `mldsa87`; a `mldsa87` stanza appearing before any
 recipient block; more than one `mldsa87` stanza; zero recipient blocks; any
 line after the MAC line; a header not terminated by a MAC line.
+
+The two `mldsa87` rules are structural on purpose, and rejecting them at parse
+is strictly stronger than catching them with the header MAC: the MAC needs the
+file key, so only a recipient could ever notice, whereas a parse-time refusal
+is visible to anyone -- including a keyless verifier. Accepting a second
+stanza with last-wins semantics would let one header advertise two signers
+while each reader reports whichever its parser happened to keep, and two
+readers disagreeing about who signed a file is exactly the mistaken-identity
+outcome the fingerprint namespaces of section 11.4 exist to prevent.
 
 Unknown stanza tags are **not** skipped. `ANUBIS/v3` has no extension
 mechanism: forward compatibility is handled by bumping the version line.
@@ -820,9 +837,34 @@ the file key and hence the header MAC key; see 10.6.
 
 ### 10.5 Verifying procedure
 
+**The signature check itself requires no key.** `S` is a digest of the header
+and the payload ciphertext, and the verifying key travels in the header, so
+everything needed to check a signature is in the file. Nothing in this section
+that touches a key is a precondition of the ML-DSA-87 verification; the key
+steps belong to *decryption*, which has its own ordering requirement.
+
+Checking a signature, and nothing else -- the position of a third party
+auditing a container they cannot open:
+
 ```
-1. parse the header; note that a mldsa87 stanza is present, so sig_len = 4627
-2. reject if file_size < header_len + 16 + 4627
+1. parse the header; a mldsa87 stanza is present, so sig_len = 4627
+2. reject if file_size < header_len + 4627 + 16
+3. read the last 4627 bytes as the signature
+4. h = SHA-512 over header_bytes || payload region [header_len, size-4627)
+5. ML-DSA-87.Verify(verifying_key, h.finalize(), signature,
+                    ctx = "anubis-v2-file")
+```
+
+That is the whole of it. No identity, no file key, no decryption, and no
+plaintext. The reference implementation exposes it as `anubis verify`; see
+[VERIFYING.md](VERIFYING.md) for a worked recipe using stock OpenSSL instead.
+
+Decrypting a signed container additionally requires the file key, and there
+the ordering IS normative:
+
+```
+1. parse the header                            (sig_len = 4627 if signed)
+2. reject if file_size < header_len + 4627 + 16
 3. recover the file key                        (section 6.3)
 4. verify the header MAC over H                (section 7.2)
 5. read the last 4627 bytes as the signature

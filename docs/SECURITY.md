@@ -207,8 +207,13 @@ sender to anyone. Section 2.4 states what that costs.
 
 ### 2.4 Sender authentication (SUF-CMA), optional
 
-**Goal.** When a signature is present, a recipient can verify that the holder of
-the corresponding ML-DSA-87 signing key produced **this exact file**: the
+**Goal.** When a signature is present, **anyone holding the bytes** can verify
+that the holder of the corresponding ML-DSA-87 signing key produced **this
+exact file**. Verification is keyless: the signature is over a digest of the
+header and the payload ciphertext, and the verifying key travels in the
+header, so a third party who cannot decrypt the container -- and should not be
+able to -- can still establish its provenance (`anubis verify`, or
+[VERIFYING.md](VERIFYING.md) for a stock-OpenSSL recipe). Concretely: the
 signature is over `SHA-512(header || payload_ciphertext)`, so it commits the
 signer to the recipient set, the header, and every byte of ciphertext. Strong
 unforgeability: an adversary cannot produce any new valid (message, signature)
@@ -467,10 +472,41 @@ be mapped to an exact version.
 The format cannot enforce these. They are where practical security is usually
 won or lost.
 
-- **Back up identity files.** Losing an identity means permanently losing
-  access to everything encrypted to it. There is no recovery, no escrow, and
-  no key derivation from a passphrase. The 230-character identity string is
-  short enough to be written on paper deliberately.
+- **Back up identity files, and test the restore.** Losing an identity means
+  permanently losing access to everything encrypted to it. There is no
+  recovery, no escrow, and no key derivation from a passphrase. The
+  230-character identity string is short enough to be written on paper
+  deliberately.
+
+  An identity is a single file, `~/.config/anubis/identities/<name>.key`. To
+  back one up and prove the backup works:
+
+  ```sh
+  # 1. Copy the identity somewhere durable and offline.
+  cp ~/.config/anubis/identities/default.key /mnt/backup/
+
+  # 2. Record the two fingerprints separately from the key, so a restored
+  #    file can be recognised as the right one.
+  anubis status --json | jq -r '.identities[] | "\(.name) \(.fingerprint) \(.signing_fingerprint)"'
+
+  # 3. TEST THE RESTORE, in a scratch HOME, before you need it.
+  #    An untested backup is a belief, not a backup.
+  export HOME=$(mktemp -d)
+  mkdir -p "$HOME/.config/anubis/identities"
+  cp /mnt/backup/default.key "$HOME/.config/anubis/identities/"
+  chmod 700 "$HOME/.config/anubis" "$HOME/.config/anubis/identities"
+  chmod 600 "$HOME/.config/anubis/identities/default.key"
+  anubis status                      # fingerprints must match step 2
+  anubis decrypt --identity default some-real-container.anubis -o /dev/null
+  ```
+
+  Restoring is exactly that copy plus those modes: mode `0600` in a `0700`
+  directory. Nothing else is required, and nothing in the file depends on the
+  machine that made it.
+
+- **Keep a container you can re-open as a canary.** A backup that restores a
+  file which no longer decrypts anything is not a backup. Step 3 above is the
+  whole test, and it costs one command.
 - **Verify recipients out of band by fingerprint.** Confirm the 80-bit
   `ANUBIS-FP` over a channel the adversary does not control. Accepting a
   recipient from an untrusted channel means encrypting to whoever supplied it.

@@ -663,15 +663,25 @@ function signingFingerprint(identity) {
   return identity ? formatFingerprint(identity.signing_fingerprint) : ""
 }
 
+// Presence is a header fact; validity is not. `inspect` never hashes the
+// payload, so it can say a container is signed and can never say the
+// signature is good. This surface reserves the accent tone for things that
+// were actually verified, so present-but-unchecked is "notice" -- the bar
+// readout runs no verification of its own, and the vault is where a
+// signature can be checked.
 function signatureTone(inspect) {
   if (!inspect) return "unknown"
   if (inspect.signed !== true) return "none"
-  return signerFingerprint(inspect) === "" ? "unknown" : "good"
+  if (inspect.signature_ok === true) return "good"
+  if (inspect.signature_ok === false) return "bad"
+  return "notice"
 }
 
 function signatureLabel(inspect) {
   var tone = signatureTone(inspect)
-  if (tone === "good") return "SIGNED -- ML-DSA-87"
+  if (tone === "good") return "SIGNATURE VERIFIED -- ML-DSA-87"
+  if (tone === "bad") return "SIGNATURE FAILED"
+  if (tone === "notice") return "SIGNED -- NOT VERIFIED HERE"
   if (tone === "none") return "UNSIGNED"
   return "SIGNATURE NOT STATED"
 }

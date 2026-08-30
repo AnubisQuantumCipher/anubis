@@ -296,6 +296,23 @@ impl Header {
                             "signature stanza needs exactly one argument".into(),
                         ));
                     }
+                    // Section 4.3: at most one signature block, and only after
+                    // the recipient blocks. Accepting a second one silently
+                    // last-wins, which lets a header advertise two signers
+                    // while a verifier reports whichever the parser happened to
+                    // keep -- two readers disagreeing about who signed a file
+                    // is exactly the mistaken-identity outcome this format
+                    // spends a fingerprint namespace to prevent.
+                    if verifying_key.is_some() {
+                        return Err(Error::Header(
+                            "more than one mldsa87 stanza".into(),
+                        ));
+                    }
+                    if stanzas.is_empty() {
+                        return Err(Error::Header(
+                            "mldsa87 stanza before any recipient block".into(),
+                        ));
+                    }
                     let vk = B64
                         .decode(parts[1])
                         .map_err(|e| Error::Header(format!("bad verifying key: {e}")))?;
@@ -736,6 +753,20 @@ impl<R: Read> DelayReader<R> {
     }
 }
 
+impl<R: Read> DelayReader<R> {
+    /// The withheld trailer, once the stream has been read to its end.
+    ///
+    /// `None` when fewer than `tail` bytes were ever withheld, which means the
+    /// stream ended before it could carry a trailer at all.
+    fn take_tail(&mut self) -> Option<Vec<u8>> {
+        let live = self.window.len() - self.head;
+        if !self.eof || live < self.tail {
+            return None;
+        }
+        Some(self.window[self.window.len() - self.tail..].to_vec())
+    }
+}
+
 impl<R: Read> Read for DelayReader<R> {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         if out.is_empty() {
@@ -790,6 +821,225 @@ pub fn inspect<R: Read>(reader: R, total_len: u64) -> Result<Inspection> {
         payload_bytes: payload,
         chunks,
     })
+}
+
+/// The outcome of a keyless signature check.
+///
+/// Every field here is derivable from the container and the public key it
+/// carries. Nothing in this struct required a private key to produce.
+#[derive(Debug)]
+pub struct Verification {
+    pub format: String,
+    pub recipients: usize,
+    pub signed: bool,
+    /// The embedded ML-DSA-87 verifying key, when the container carries one.
+    pub verifying_key: Option<Vec<u8>>,
+    /// `Some(true)` when the signature verified. `None` when the container is
+    /// unsigned, which is a distinct state and never a pass: a signature can
+    /// be stripped by any recipient (see the format specification, 10.6), so
+    /// its absence is not evidence about whether the sender signed.
+    ///
+    /// A signature that is present and does not verify is reported as
+    /// [`Error::BadSignature`], never as `Some(false)`, so that a caller which
+    /// ignores the error cannot mistake a forgery for a result.
+    pub signature_ok: Option<bool>,
+    pub header_bytes: u64,
+    pub payload_bytes: u64,
+    pub chunks: u64,
+}
+
+/// Verify a container's signature **without any private key**.
+///
+/// The signature is over `SHA-512(header_bytes || payload_ciphertext)`, and
+/// the verifying key travels in the header, so checking it requires no
+/// recipient identity, no file key, and no decryption. Anyone holding the
+/// bytes can establish that the holder of a particular ML-DSA-87 key produced
+/// this exact file.
+///
+/// This is deliberately reachable on its own rather than only as a step
+/// inside [`decrypt`]. A third party auditing a container -- someone who
+/// cannot and should not be able to read it -- must still be able to check
+/// its provenance with the reference implementation instead of reconstructing
+/// the signing transcript by guesswork.
+///
+/// What it does **not** establish is who that key belongs to. Compare the
+/// fingerprint against a value confirmed out of band; an unpinned valid
+/// signature identifies no one.
+///
+/// The payload is hashed, never decrypted, so nothing secret enters memory
+/// and no plaintext is produced.
+pub fn verify<R: Read>(reader: R, total_len: u64) -> Result<Verification> {
+    verify_with_progress(reader, total_len, |_| {})
+}
+
+/// [`verify`] for a stream of unknown length, such as a pipe.
+///
+/// Uses the same delay buffer as [`decrypt_unsized`]: the trailing `SIG_LEN`
+/// bytes are withheld while everything ahead of them is hashed, so whatever
+/// remains at end of input is exactly the signature. Memory stays bounded by
+/// the trailer regardless of file size.
+///
+/// This matters more here than anywhere else in the crate. `verify` is the one
+/// entry point meant to be aimed at a container from a stranger, so it must
+/// not require holding that container in memory to form an opinion about it.
+pub fn verify_unsized<R: Read>(reader: R) -> Result<Verification> {
+    let mut buf = BufReader::new(reader);
+    let header = Header::parse(&mut buf)?;
+    let header_len = header.raw.len() as u64;
+    let signed = header.verifying_key.is_some();
+
+    let mut out = Verification {
+        format: MAGIC.to_string(),
+        recipients: header.stanzas.len(),
+        signed,
+        verifying_key: header.verifying_key.clone(),
+        signature_ok: None,
+        header_bytes: header_len,
+        payload_bytes: 0,
+        chunks: 1,
+    };
+
+    let Some(vk_bytes) = header.verifying_key.as_ref() else {
+        // Nothing to check, and the payload length is not worth a full read to
+        // learn. Drain so the caller's pipe does not block on a writer.
+        let mut sink = std::io::sink();
+        out.payload_bytes = std::io::copy(&mut buf, &mut sink)?;
+        out.chunks = out.payload_bytes.div_ceil(stream::CHUNK_CT as u64).max(1);
+        return Ok(out);
+    };
+
+    let mut hasher = Sha512::new();
+    hasher.update(&header.raw);
+
+    let mut delay = DelayReader::new(buf.by_ref(), SIG_LEN);
+    let mut window = vec![0u8; 64 << 10];
+    let mut payload: u64 = 0;
+    loop {
+        let n = delay.read(&mut window)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&window[..n]);
+        payload += n as u64;
+    }
+    let sig_bytes = delay.take_tail().ok_or_else(|| {
+        Error::Integrity("signature trailer is truncated".into())
+    })?;
+
+    if payload < stream::TAG as u64 {
+        return Err(Error::Integrity("file is truncated".into()));
+    }
+    out.payload_bytes = payload;
+    out.chunks = payload.div_ceil(stream::CHUNK_CT as u64).max(1);
+
+    check_signature(vk_bytes, &sig_bytes, hasher)?;
+    out.signature_ok = Some(true);
+    Ok(out)
+}
+
+/// Decode the key and trailer and check the digest under them.
+///
+/// Shared by the sized and unsized paths so there is exactly one place where a
+/// signature is judged, and no way for the two to drift apart.
+fn check_signature(vk_bytes: &[u8], sig_bytes: &[u8], hasher: Sha512) -> Result<()> {
+    let vk_arr = Array::try_from(vk_bytes)
+        .map_err(|_| Error::Header("bad verifying key length".into()))?;
+    let vk = VerifyingKey::<MlDsa87>::decode(&vk_arr);
+    let sig_arr =
+        Array::try_from(sig_bytes).map_err(|_| Error::Integrity("bad signature length".into()))?;
+    let sig = Signature::<MlDsa87>::decode(&sig_arr).ok_or(Error::BadSignature)?;
+
+    let digest = hasher.finalize();
+    if !vk.verify_with_context(&digest, SIG_CONTEXT, &sig) {
+        return Err(Error::BadSignature);
+    }
+    Ok(())
+}
+
+/// [`verify`], reporting bytes hashed so far.
+///
+/// The callback receives a running count of payload bytes consumed, so a
+/// caller can show progress while checking a container too large to sit in
+/// memory.
+pub fn verify_with_progress<R, F>(reader: R, total_len: u64, mut progress: F) -> Result<Verification>
+where
+    R: Read,
+    F: FnMut(u64),
+{
+    let mut buf = BufReader::new(reader);
+    let header = Header::parse(&mut buf)?;
+    let header_len = header.raw.len() as u64;
+    let signed = header.verifying_key.is_some();
+    let sig_len = if signed { SIG_LEN as u64 } else { 0 };
+
+    let payload = payload_span(total_len, header_len, sig_len)?;
+
+    // Even an empty plaintext produces one chunk, which is a bare AEAD tag.
+    // A payload region smaller than that cannot be a container, and saying so
+    // here keeps a grossly truncated file out of the signature path -- where
+    // it would come back as "signature failed" and read as forgery rather
+    // than as damage.
+    if payload < stream::TAG as u64 {
+        return Err(Error::Integrity("file is truncated".into()));
+    }
+
+    let chunk_ct = stream::CHUNK_CT as u64;
+    let chunks = payload.div_ceil(chunk_ct).max(1);
+
+    let mut out = Verification {
+        format: MAGIC.to_string(),
+        recipients: header.stanzas.len(),
+        signed,
+        verifying_key: header.verifying_key.clone(),
+        signature_ok: None,
+        header_bytes: header_len,
+        payload_bytes: payload,
+        chunks,
+    };
+
+    // Unsigned is a complete answer, not a failure. Report it and stop rather
+    // than reading a payload whose bytes cannot change the verdict.
+    let Some(vk_bytes) = header.verifying_key.as_ref() else {
+        return Ok(out);
+    };
+
+    // Hash the header and the payload ciphertext exactly as the signer did.
+    // The ciphertext is hashed as it lies on disk; it is never decrypted, so
+    // this path handles a container addressed to someone else without ever
+    // being able to read it.
+    let mut hasher = Sha512::new();
+    hasher.update(&header.raw);
+
+    let mut window = vec![0u8; 64 << 10];
+    let mut remaining = payload;
+    let mut hashed: u64 = 0;
+    while remaining > 0 {
+        let want = remaining.min(window.len() as u64) as usize;
+        buf.read_exact(&mut window[..want]).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                Error::Integrity("file is truncated".into())
+            } else {
+                Error::Io(e)
+            }
+        })?;
+        hasher.update(&window[..want]);
+        remaining -= want as u64;
+        hashed += want as u64;
+        progress(hashed);
+    }
+
+    let mut sig_bytes = vec![0u8; SIG_LEN];
+    buf.read_exact(&mut sig_bytes).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::Integrity("signature trailer is truncated".into())
+        } else {
+            Error::Io(e)
+        }
+    })?;
+
+    check_signature(vk_bytes, &sig_bytes, hasher)?;
+    out.signature_ok = Some(true);
+    Ok(out)
 }
 
 #[cfg(kani)]

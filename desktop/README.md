@@ -185,6 +185,13 @@ exactly the mistaken-identity error the fingerprint exists to prevent.
 
 ![After a decrypt: completed with size, time and throughput; HEADER MAC VERIFIED BY DECRYPT; SIGNED with the signer fingerprint](../docs/screenshots/decrypt-verified.png)
 
+A signature's presence and its validity are separate claims, and the inspector
+keeps them separate: a container is `SIGNED -- NOT VERIFIED HERE` until a check
+actually runs. Verifying needs no key, so the button is offered even for a
+container this vault cannot decrypt.
+
+![A container from a stranger: the header MAC is not determinable, but the signature verifies](../docs/screenshots/verify-keyless.png)
+
 ### The header MAC
 
 `anubis inspect` always reports `header_mac_ok: null`, and that is by design:
@@ -245,6 +252,7 @@ has no short form.
 anubis status    --json
 anubis keygen    --json --name <NAME>
 anubis inspect   --json <FILE>
+anubis verify    --json [--signer <FINGERPRINT>] <FILE>
 anubis encrypt   --json -r <KEY> [-r ...] [--sign] [--identity <NAME>] -o <OUT> [--force] <INPUT>
 anubis decrypt   --json [--identity <NAME>] -o <OUT> [--force] <INPUT>
 anubis recipient list   --json
@@ -259,6 +267,12 @@ labelled `working` rather than claiming a percentage the engine never reported.
 
 The address book is read and written only through the engine, so there is one
 parser and no write race with a concurrent CLI invocation.
+
+`verify` is the one call that needs no key: the signature covers a digest of
+the header and the payload ciphertext, so the vault can check a container it
+cannot decrypt. That is why the inspector reports a signature's presence and
+its validity as separate states, and only promotes the chip once a verify has
+actually run over those exact bytes.
 
 `anubis` is the only binary this program executes. Locating the engine, testing
 whether an output already exists, and putting a recipient on the clipboard are

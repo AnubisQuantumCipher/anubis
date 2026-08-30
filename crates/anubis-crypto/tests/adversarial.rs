@@ -838,17 +838,61 @@ fn crlf_line_endings_are_rejected() {
 }
 
 #[test]
-fn reordering_the_signature_stanza_breaks_the_header_mac() {
-    // The sharpest test of "the MAC covers the raw bytes". Stanza ORDER is
-    // not semantically meaningful to the parser: moving the mldsa87 stanza
-    // ahead of the recipient stanzas parses to exactly the same fields, so a
-    // MAC over a canonical re-serialisation would still verify. Only a MAC
-    // over the on-disk prefix notices. The move is length-preserving, so
-    // nothing else about the file changes.
+fn reordering_recipient_stanzas_breaks_the_header_mac() {
+    // The sharpest test of "the MAC covers the raw bytes". Recipient order is
+    // the writer's order and carries no meaning to the parser: swapping two
+    // recipient stanzas yields the same set of stanzas, so a MAC over a
+    // canonical re-serialisation of the parsed fields would still verify.
+    // Only a MAC over the on-disk prefix notices. The swap is
+    // length-preserving, so nothing else about the file changes.
     let a = Identity::generate().unwrap();
     let b = Identity::generate().unwrap();
     let rs = [a.to_recipient().unwrap(), b.to_recipient().unwrap()];
     let sealed = seal(b"who signed this, and where does it say so", &rs, Some(&a));
+
+    // A recipient stanza is TWO lines: the tagged line and its continuation
+    // body. Both must move together, or the swap detaches a wrapped key from
+    // its stanza and the result fails to decapsulate for an uninteresting
+    // reason instead of failing the MAC for the interesting one.
+    let rec_prefix = format!("-> {} ", format::STANZA_HYBRID);
+    let moved = rewrite_header_lines(&sealed, |lines| {
+        let heads: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with(&rec_prefix))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(heads.len(), 2, "expected two recipient stanzas");
+        let (a0, b0) = (heads[0], heads[1]);
+        assert_eq!(b0, a0 + 2, "each stanza should be two lines");
+        lines.swap(a0, b0);
+        lines.swap(a0 + 1, b0 + 1);
+    });
+    assert_eq!(moved.len(), sealed.len(), "the swap must preserve length");
+    assert_ne!(moved, sealed);
+
+    // It still parses, and to the same set of fields.
+    let parsed = Header::parse(&mut &moved[..]).expect("reordered header parses");
+    assert_eq!(parsed.stanzas.len(), 2);
+    assert!(parsed.verifying_key.is_some());
+
+    let err = must_refuse(&moved, &a, "reordered recipient stanzas");
+    assert!(
+        matches!(err, Error::Integrity(_)),
+        "reordering must fail header authentication, got {err}"
+    );
+}
+
+#[test]
+fn signature_stanza_before_any_recipient_is_rejected() {
+    // Section 4.3 requires this structurally, and structural rejection is
+    // strictly stronger than catching it with the header MAC: the MAC needs
+    // the file key, so only a recipient could ever notice. A parse-time
+    // refusal is visible to anyone, including `verify`, which holds no key.
+    let a = Identity::generate().unwrap();
+    let b = Identity::generate().unwrap();
+    let rs = [a.to_recipient().unwrap(), b.to_recipient().unwrap()];
+    let sealed = seal(b"ordering is normative", &rs, Some(&a));
 
     let sig_prefix = format!("-> {} ", format::STANZA_SIG);
     let moved = rewrite_header_lines(&sealed, |lines| {
@@ -856,23 +900,51 @@ fn reordering_the_signature_stanza_breaks_the_header_mac() {
             .iter()
             .position(|l| l.starts_with(&sig_prefix))
             .expect("signature stanza");
-        assert_eq!(at, lines.len() - 2, "signature stanza should be last");
         let line = lines.remove(at);
         lines.insert(1, line);
     });
-    assert_eq!(moved.len(), sealed.len(), "the move must preserve length");
-    assert_ne!(moved, sealed);
 
-    // It still parses, and to the same fields.
-    let parsed = Header::parse(&mut &moved[..]).expect("reordered header parses");
-    assert_eq!(parsed.stanzas.len(), 2);
-    assert!(parsed.verifying_key.is_some());
-
-    let err = must_refuse(&moved, &a, "reordered signature stanza");
+    let err = match Header::parse(&mut &moved[..]) {
+        Err(e) => e,
+        Ok(_) => panic!("a signature stanza before the recipients must be rejected"),
+    };
     assert!(
-        matches!(err, Error::Integrity(_)),
-        "reordering must fail header authentication, got {err}"
+        matches!(&err, Error::Header(m) if m.contains("before any recipient")),
+        "expected an ordering refusal, got {err}"
     );
+    // And the keyless verifier refuses it too, without any identity.
+    assert!(format::verify(&moved[..], moved.len() as u64).is_err());
+}
+
+#[test]
+fn a_second_signature_stanza_is_rejected() {
+    // Last-wins on a duplicate would let one header advertise two signers
+    // while each reader reports whichever its parser happened to keep. Two
+    // readers disagreeing about who signed a file is the mistaken-identity
+    // outcome the fingerprint namespaces exist to prevent.
+    let a = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let sealed = seal(b"one signer only", &[to.to_recipient().unwrap()], Some(&a));
+
+    let sig_prefix = format!("-> {} ", format::STANZA_SIG);
+    let doubled = rewrite_header_lines(&sealed, |lines| {
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(&sig_prefix))
+            .expect("signature stanza");
+        let line = lines[at].clone();
+        lines.insert(at, line);
+    });
+
+    let err = match Header::parse(&mut &doubled[..]) {
+        Err(e) => e,
+        Ok(_) => panic!("a second signature stanza must be rejected"),
+    };
+    assert!(
+        matches!(&err, Error::Header(m) if m.contains("more than one mldsa87")),
+        "expected a cardinality refusal, got {err}"
+    );
+    assert!(format::verify(&doubled[..], doubled.len() as u64).is_err());
 }
 
 #[test]
@@ -2098,4 +2170,176 @@ fn eight_mebibyte_round_trip_is_byte_identical() {
     let (res, out) = open_raw(&bad, std::slice::from_ref(&id));
     assert!(res.is_err(), "a flipped bit in chunk 3 was not detected");
     assert!(out.len() < LEN, "the whole plaintext escaped");
+}
+
+// ---------------------------------------------------------------------------
+// keyless verification
+//
+// The signature is over SHA-512(header || payload ciphertext) and the
+// verifying key travels in the header, so checking it needs no identity at
+// all. These tests hold that property: `verify` must reach the same verdict
+// as `decrypt` while holding no key, and must refuse everything `decrypt`
+// refuses. A verifier that is more permissive than the decryptor would be
+// worse than none, because it is the tool a third party trusts when they
+// cannot open the file themselves.
+// ---------------------------------------------------------------------------
+
+fn verify_bytes(sealed: &[u8]) -> anubis_crypto::Result<format::Verification> {
+    let len = sealed.len() as u64;
+    format::verify(&sealed[..], len)
+}
+
+#[test]
+fn verify_accepts_a_signed_container_without_any_identity() {
+    let signer = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let sealed = seal(b"sealed to somebody else", &[to.to_recipient().unwrap()], Some(&signer));
+
+    // No identity is passed in, and the one that could decrypt is not the one
+    // that signed. This is the third-party auditor's position exactly.
+    let v = verify_bytes(&sealed).expect("verify");
+    assert!(v.signed);
+    assert_eq!(v.signature_ok, Some(true));
+    assert_eq!(
+        v.verifying_key.as_deref(),
+        Some(signer.verifying_key().encode().as_slice())
+    );
+
+    // And the decryptor agrees, from the other side of the key boundary.
+    let opened = open(&sealed, &[to]).expect("decrypt");
+    assert_eq!(opened, b"sealed to somebody else");
+}
+
+#[test]
+fn verify_reports_unsigned_as_absent_never_as_a_pass() {
+    let to = Identity::generate().unwrap();
+    let sealed = seal(b"no signature here", &[to.to_recipient().unwrap()], None);
+
+    let v = verify_bytes(&sealed).expect("verify");
+    assert!(!v.signed);
+    // None, not Some(false): nothing was checked, and nothing failed.
+    assert_eq!(v.signature_ok, None);
+    assert!(v.verifying_key.is_none());
+}
+
+#[test]
+fn verify_refuses_a_tampered_payload() {
+    let signer = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let plain = pseudo(200_000, 0x5157);
+    let sealed = seal(&plain, &[to.to_recipient().unwrap()], Some(&signer));
+
+    // Flip one bit in the payload region, well clear of header and trailer.
+    let mut bad = sealed.clone();
+    let at = header_len_of(&sealed) + 64;
+    bad[at] ^= 0x01;
+
+    assert!(matches!(verify_bytes(&bad), Err(Error::BadSignature)));
+}
+
+#[test]
+fn verify_refuses_a_tampered_header() {
+    let signer = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let sealed = seal(b"header integrity", &[to.to_recipient().unwrap()], Some(&signer));
+
+    // The signature covers the header including its MAC line, so a header
+    // edit breaks it even though the verifier cannot check the MAC itself.
+    let mut bad = sealed.clone();
+    bad[10] ^= 0x01;
+    assert!(verify_bytes(&bad).is_err());
+}
+
+#[test]
+fn verify_refuses_a_swapped_signature() {
+    let a = Identity::generate().unwrap();
+    let b = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let rec = to.to_recipient().unwrap();
+
+    let one = seal(b"message one", &[rec.clone()], Some(&a));
+    let two = seal(b"message two", &[rec], Some(&b));
+
+    // Graft b's trailer onto a's container: a valid signature, wrong bytes.
+    let mut forged = one[..one.len() - SIG_LEN].to_vec();
+    forged.extend_from_slice(&two[two.len() - SIG_LEN..]);
+
+    assert!(matches!(verify_bytes(&forged), Err(Error::BadSignature)));
+}
+
+#[test]
+fn verify_refuses_a_truncated_container() {
+    let signer = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let sealed = seal(&pseudo(100_000, 9), &[to.to_recipient().unwrap()], Some(&signer));
+    let header = header_len_of(&sealed);
+
+    // Truncation splits into two regimes and the boundary is worth pinning,
+    // because the two produce different reports to a user.
+    //
+    // Gross truncation -- no room left for a payload and a trailer -- is
+    // structurally detectable and is reported as an integrity failure, so a
+    // damaged file is not presented as a forged one.
+    // Two structurally detectable bands: no room for the trailer at all, and
+    // room for the trailer but not for even one AEAD tag of payload.
+    let cuts = [
+        header,
+        header + 1,
+        header + SIG_LEN - 1,
+        header + SIG_LEN,          // trailer fits, payload is empty
+        header + SIG_LEN + TAG - 1, // payload smaller than one tag
+    ];
+    for cut in cuts {
+        let err = verify_bytes(&sealed[..cut]).unwrap_err();
+        assert!(
+            matches!(err, Error::Integrity(_)),
+            "truncation to {cut} must report integrity, got {err:?}"
+        );
+    }
+
+    // Losing a byte off the end of a long file is NOT structurally
+    // detectable: what remains is a well-formed container whose digest no
+    // longer matches. Cryptography cannot tell that from an edit, and the
+    // verifier must not pretend otherwise -- it reports a signature that did
+    // not verify, which is exactly what it observed.
+    assert!(matches!(
+        verify_bytes(&sealed[..sealed.len() - 1]),
+        Err(Error::BadSignature)
+    ));
+}
+
+
+#[test]
+fn verify_agrees_with_inspect_on_header_facts() {
+    let signer = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let sealed = seal(&pseudo(300_000, 77), &[to.to_recipient().unwrap()], Some(&signer));
+    let len = sealed.len() as u64;
+
+    let i = format::inspect(&sealed[..], len).expect("inspect");
+    let v = verify_bytes(&sealed).expect("verify");
+
+    // Two independent paths over the same bytes must not disagree about what
+    // the container is; a divergence here is a parser bug in one of them.
+    assert_eq!(i.header_bytes, v.header_bytes);
+    assert_eq!(i.payload_bytes, v.payload_bytes);
+    assert_eq!(i.chunks, v.chunks);
+    assert_eq!(i.recipients, v.recipients);
+    assert_eq!(i.signed, v.signed);
+    assert_eq!(i.verifying_key, v.verifying_key);
+}
+
+#[test]
+fn verify_never_emits_plaintext_and_handles_an_empty_payload() {
+    let signer = Identity::generate().unwrap();
+    let to = Identity::generate().unwrap();
+    let sealed = seal(b"", &[to.to_recipient().unwrap()], Some(&signer));
+
+    let v = verify_bytes(&sealed).expect("verify");
+    assert_eq!(v.signature_ok, Some(true));
+
+    // An empty plaintext is still one chunk of ciphertext, and the verifier
+    // must account for it rather than reading the trailer as payload.
+    assert!(v.payload_bytes >= TAG as u64);
+    assert_eq!(v.chunks, 1);
 }

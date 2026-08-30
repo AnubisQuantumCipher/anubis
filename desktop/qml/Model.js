@@ -675,17 +675,79 @@ function signingFingerprint(identity) {
   return identity ? formatFingerprint(identity.signing_fingerprint) : ""
 }
 
+// A signature's PRESENCE and its VALIDITY are different claims, and this
+// surface must never merge them. `inspect` reads the header alone; checking a
+// signature means hashing every byte of payload, which inspect does not do. So
+// a container can be known to be signed and not known to be validly signed.
+//
+// Until v2.0.0 this function returned "good" -- the accent tone, which on this
+// surface means VERIFIED -- for any container whose header carried a signer.
+// That was an unearned pass: nothing had verified anything. The engine now has
+// a keyless `verify`, so the honest states are distinguishable and this returns
+// "notice" (a readable neutral) for present-but-unchecked.
 function signatureTone(inspect) {
   if (!inspect) return "unknown"
   if (inspect.signed !== true) return "none"
-  return signerFingerprint(inspect) === "" ? "unknown" : "good"
+  if (inspect.signature_ok === true) return "good"
+  if (inspect.signature_ok === false) return "bad"
+  return "notice"
 }
 
 function signatureLabel(inspect) {
   var tone = signatureTone(inspect)
-  if (tone === "good") return "SIGNED -- ML-DSA-87"
+  if (tone === "good") return "SIGNATURE VERIFIED -- ML-DSA-87"
+  if (tone === "bad") return "SIGNATURE FAILED"
+  if (tone === "notice") return "SIGNED -- NOT VERIFIED HERE"
   if (tone === "none") return "UNSIGNED"
   return "SIGNATURE NOT STATED"
+}
+
+function signatureExplanation(inspect) {
+  var tone = signatureTone(inspect)
+  if (tone === "bad")
+    return "The ML-DSA-87 signature does not match these bytes. The file "
+      + "changed after it was signed, or it was not signed by that key."
+  if (tone === "good")
+    return "The ML-DSA-87 signature matched over this exact file."
+  if (tone === "none")
+    return "No signature. That is not the same as the sender not signing: "
+      + "any recipient holds the file key and can strip a signature, so "
+      + "absence carries no information. Require one up front instead."
+  if (tone === "notice")
+    return "The header names a signer, and nothing here has checked its "
+      + "signature -- that means hashing the whole payload, which inspect "
+      + "does not do. Verify needs no key and decrypts nothing."
+  return "The engine did not state whether this container is signed."
+}
+
+// A `verify` that actually ran over these exact bytes is allowed to promote
+// the chip, exactly as a decrypt promotes the header MAC. The claim is about a
+// check that happened, at a stated time, and is never persisted.
+function signatureToneAttested(inspect, attested) {
+  var tone = signatureTone(inspect)
+  if (tone !== "notice") return tone
+  if (!attested) return tone
+  return attested.ok === true ? "good" : "bad"
+}
+
+function signatureLabelAttested(inspect, attested) {
+  var tone = signatureTone(inspect)
+  if (tone !== "notice" || !attested) return signatureLabel(inspect)
+  return attested.ok === true ? "SIGNATURE VERIFIED -- ML-DSA-87"
+                              : "SIGNATURE FAILED"
+}
+
+function signatureExplanationAttested(inspect, attested) {
+  var tone = signatureTone(inspect)
+  if (tone !== "notice" || !attested) return signatureExplanation(inspect)
+  if (attested.ok !== true)
+    return "A verify of this container at " + stampClock(attested.at)
+      + " checked the ML-DSA-87 signature and it did NOT match. "
+      + String(attested.error || "")
+  return "A check of this container at " + stampClock(attested.at)
+    + " verified the ML-DSA-87 signature over these exact bytes. It proves "
+    + "the holder of that key produced this file; it does not say who that "
+    + "holder is."
 }
 
 // -------------------------------------------------- legacy-format notices

@@ -2624,8 +2624,16 @@ Item {
 
                 Rectangle {
                   id: sigPanel
+                  // A verify that actually ran over these exact bytes may
+                  // promote this chip, exactly as a decrypt promotes the
+                  // header MAC. Presence alone never does: inspect reads the
+                  // header, and a signature is only checked by hashing the
+                  // whole payload.
+                  readonly property var attested:
+                    anubis.sigAttestedFor(anubis.inspectPath)
                   readonly property string sigTone:
-                    Model.signatureTone(anubis.inspectResult)
+                    Model.signatureToneAttested(anubis.inspectResult,
+                                                sigPanel.attested)
                   readonly property string paintTone:
                     sigPanel.sigTone === "none" ? "neutral" : sigPanel.sigTone
                   readonly property string signerFp:
@@ -2641,7 +2649,7 @@ Item {
                   radius: Style.cornerRadius
                   color: Qt.alpha(root.toneColor(sigPanel.paintTone), 0.10)
                   border.color: Qt.alpha(root.toneColor(sigPanel.paintTone), 0.5)
-                  border.width: 1
+                  border.width: sigPanel.sigTone === "bad" ? 2 : 1
 
                   Column {
                     id: sigCol
@@ -2654,8 +2662,12 @@ Item {
                       width: sigCol.width
                       wrapMode: Text.WordWrap
                       text: (sigPanel.sigTone === "good"
-                             ? Model.GLYPH.signature : Model.GLYPH.shield)
-                        + "  " + Model.signatureLabel(anubis.inspectResult)
+                             ? Model.GLYPH.shieldCheck
+                             : (sigPanel.sigTone === "bad"
+                                ? Model.GLYPH.shieldAlert
+                                : Model.GLYPH.signature))
+                        + "  " + Model.signatureLabelAttested(
+                                   anubis.inspectResult, sigPanel.attested)
                       color: root.toneColor(sigPanel.paintTone)
                       font.bold: true
                       font.pixelSize: Style.font.bodySmall
@@ -2663,10 +2675,16 @@ Item {
                     Mono {
                       width: sigCol.width
                       wrapMode: Text.WordWrap
+                      // Attribution keys off whether a signer fingerprint
+                      // EXISTS, never off whether the signature has been
+                      // checked. Keying it on tone once made an unverified
+                      // signature report "no signature to attribute", which
+                      // is simply false: there is a signer, it just has not
+                      // been verified yet.
                       text: sigPanel.signer
                         ? "signed by your identity \""
                           + sigPanel.signer.name + "\""
-                        : (sigPanel.sigTone === "good"
+                        : (sigPanel.signerFp !== ""
                            ? "signer is not an identity in this vault -- "
                              + "check the fingerprint out of band before "
                              + "trusting it"
@@ -2677,9 +2695,26 @@ Item {
                     Mono {
                       width: sigCol.width
                       wrapMode: Text.WordWrap
+                      text: Model.signatureExplanationAttested(
+                              anubis.inspectResult, sigPanel.attested)
+                      color: Qt.alpha(root.fg, 0.45)
+                    }
+                    Mono {
+                      width: sigCol.width
+                      wrapMode: Text.WordWrap
                       text: "A signature says who wrote the file. The header "
                         + "MAC does not."
                       color: Qt.alpha(root.fg, 0.32)
+                    }
+                    // Offered only while there is something to check and no
+                    // answer yet. Verifying needs no key, so it is offered
+                    // even for a container this vault cannot decrypt.
+                    ActionButton {
+                      visible: sigPanel.sigTone === "notice"
+                      glyph: Model.GLYPH.shieldCheck
+                      label: anubis.verifyBusy ? "verifying" : "verify signature"
+                      available: !anubis.verifyBusy && !anubis.engineMissing
+                      onActivated: anubis.verifySignature(anubis.inspectPath)
                     }
                   }
                 }
