@@ -18,7 +18,7 @@ One repository, three surfaces:
 | `desktop/` | **ANUBIS Vault**, the standalone Qt 6 desktop application |
 | `plugin/` | `khephri.anubis`, the Omarchy bar readout |
 
-![The ANUBIS Vault cockpit: identity vault, operation console with a signed container inspected, ledger and audit timeline](docs/screenshots/vault.png)
+![The ANUBIS Vault on an Omarchy desktop: identity vault, operation console, ledger and audit timeline](docs/screenshots/vault.png)
 
 ---
 
