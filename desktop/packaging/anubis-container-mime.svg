@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>ANUBIS encrypted container</title>
+  <!-- A page, not a launcher. A sealed file should read as a document that is
+       shut, not as the application that opens it. -->
+  <path fill="#161a17" stroke="#2b3630" stroke-width="6"
+        d="M 52 18 L 158 18 L 210 70 L 210 238 L 52 238 Z"/>
+  <path fill="#2b3630" d="M 158 18 L 210 70 L 158 70 Z"/>
+  <!-- The jackal shield, small and centred low, so the page silhouette reads
+       first at 16 px and the mark identifies it at 32 and up. -->
+  <path fill="#e0a83a"
+        d="M 84 96
+           L 110 112
+           L 131 122
+           L 152 112
+           L 178 96
+           L 172 150
+           C 172 184, 154 205, 131 216
+           C 108 205, 90 184, 90 150
+           Z"/>
+  <circle cx="131" cy="152" r="12" fill="#161a17"/>
+  <path fill="#161a17" d="M 125 161 L 121 186 L 141 186 L 137 161 Z"/>
+</svg>

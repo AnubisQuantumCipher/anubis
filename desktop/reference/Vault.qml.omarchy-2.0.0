@@ -1,0 +1,2904 @@
+// ANUBIS VAULT -- full-screen mission control for post-quantum file encryption.
+//
+// Overlay kind: summoned from the bar widget, dismissed with Esc or a click on
+// the brand. Everything painted here is the `anubis` engine's own JSON. This
+// surface holds no key material, computes no ciphertext, and decides no
+// verification outcome; when the engine declines to state something, the panel
+// says so rather than filling in a pass.
+//
+// Layout is a three-rail cockpit:
+//
+//   LEFT    the vault itself -- identities and the recipient address book,
+//           both keyed by FINGERPRINT, because an ANUBIS recipient is roughly
+//           2573 bech32 characters and no human compares that.
+//   CENTRE  the console -- what is about to happen and what is happening,
+//           then the inspector for whatever container is selected.
+//   RIGHT   the record -- counts, an activity strip, and the audit timeline.
+//
+// One colour rule runs through the whole surface. The urgent colour means
+// AUTHENTICATION FAILED: a header MAC that did not verify, a signature that
+// did not check out, an operation that died. It is never spent on anything
+// else. A container from an older, unsupported wire format is not tampering,
+// so it is drawn as a plain notice with an upgrade path.
+//
+// The assurance line is pinned outside every scroll area, because it is the
+// line that must never be scrolled away.
+
+import QtQuick
+import QtQuick.Controls
+import Quickshell
+import Quickshell.Io
+import Quickshell.Wayland
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+
+Item {
+  id: root
+
+  property var shell: ({})
+  property var manifest: ({})
+  property bool opened: false
+
+  // Inline settings, read from the same shell.json the bar host reads. The
+  // overlay is not handed the bar entry, so it resolves its own copy.
+  property var pluginSettings: ({})
+
+  readonly property string home: Quickshell.env("HOME") || ""
+  readonly property string fontFamily: Style.font.family
+  readonly property color fg: Color.foreground
+  readonly property color accent: Color.accent
+  readonly property color urgent: Color.urgent
+
+  // ---- one spacing scale ---------------------------------------------------
+  //
+  // Every gap on this surface is one of five roles, and each role is a theme
+  // spacing token rather than a number picked by eye. Nothing below calls
+  // Style.space() with an ad-hoc argument, so a user who scales spacing in
+  // their theme scales this whole cockpit coherently instead of unevenly.
+  readonly property int padTight: Style.spacing.xxs    //  2  baseline nudge
+  readonly property int padLine: Style.spacing.sm      //  4  lines of one thought
+  readonly property int padGroup: Style.spacing.lg     //  8  groups inside a card
+  readonly property int padCard: Style.spacing.xxl     // 12  card interior, card to card
+  readonly property int padRail: Style.spacing.huge    // 18  rail gutter, body margin
+
+  // ---- one type scale ------------------------------------------------------
+  //
+  // Four steps, each with one job. Before this the whole surface sat inside a
+  // 10-11px band, which is why nothing read as a heading: hierarchy needs a
+  // scale, not just a bolder weight.
+  readonly property int typeMeta: Style.font.caption      // 10  provenance, units
+  readonly property int typeBody: Style.font.bodySmall    // 11  values, body copy
+  readonly property int typeLead: Style.font.body         // 12  card titles, names
+  readonly property int typeBrand: Style.font.title       // 14  the brand only
+
+  // ---- motion --------------------------------------------------------------
+  //
+  // The same `motionEnabled` switch the sibling plugins expose. Every
+  // transition here is a fade or a colour ramp under 180ms and none of them
+  // gate input: with motion off the surface simply snaps.
+  readonly property bool motion: opts.motionEnabled
+  readonly property int motionFast: motion ? 110 : 0
+  readonly property int motionBase: motion ? 160 : 0
+
+  // ---- console state -------------------------------------------------------
+  property string targetPath: ""
+  property var selection: []          // recipient keys chosen for encryption
+  property bool signRequested: false
+  property string chosenIdentity: ""
+  property string newIdentityName: ""
+  property string newRecipientLabel: ""
+  property string newRecipientKey: ""
+  property string focusRequest: ""    // which action the last shortcut wanted
+  property double nowMs: Date.now()
+
+  readonly property var opts: Model.resolveSettings(pluginSettings)
+  readonly property string effectiveIdentity:
+    Model.effectiveIdentity(anubis.status, opts.defaultIdentity, chosenIdentity)
+  readonly property var selectedKeys:
+    Model.selectedKeys(anubis.status, selection)
+  readonly property bool targetIsVault: Model.isVaultFile(targetPath)
+
+  readonly property string vaultState:
+    Model.panelState(anubis.engineMissing, anubis.status, anubis.statusError)
+
+  // The engine driver, exposed so the bar widget, the IPC surface, and any
+  // harness can read the same state the cockpit renders instead of starting
+  // a second poller against the same binary.
+  readonly property alias engine: anubis
+
+  // ==========================================================================
+  // lifecycle
+  // ==========================================================================
+
+  function open(payloadJson) {
+    var payload = {}
+    try {
+      payload = typeof payloadJson === "string"
+        ? JSON.parse(payloadJson || "{}") : (payloadJson || {})
+    } catch (error) { payload = {} }
+
+    opened = true
+    anubis.actionError = ""
+    anubis.opError = ""
+    anubis.cancelPending()
+    shellSettings.reload()
+
+    if (payload.path) selectPath(String(payload.path))
+    if (anubis.enginePath === "") anubis.probeEngine()
+    else anubis.refresh()
+
+    Qt.callLater(function () {
+      keyCatcher.forceActiveFocus()
+      activityStrip.requestPaint()
+    })
+  }
+
+  // Host-initiated close. `shell.hide(id)` lands here, so this is the terminal
+  // end of a dismissal and must never route back out through the host: that is
+  // an unbounded close -> hide -> close recursion. It used to be exactly that,
+  // and the symptom was the host logging
+  //   plugin khephri.anubis close() threw: RangeError: Maximum call stack size
+  // on every teardown -- which aborted the host's plugin unload, so a changed
+  // file on disk never actually replaced the loaded overlay.
+  function close() {
+    opened = false
+    focusRequest = ""
+    anubis.cancelPending()
+  }
+
+  // User-initiated dismissal: Esc, the brand, the close button. Routed through
+  // the host so its open-panel bookkeeping stays consistent, and the host calls
+  // close() straight back. This is the same split the first-party panels use.
+  function dismiss() {
+    if (shell && typeof shell.hide === "function") shell.hide("khephri.anubis")
+    else close()
+  }
+
+  function applySettings(text) {
+    pluginSettings = Model.settingsFromShellJson(text, "khephri.anubis")
+  }
+
+  // ==========================================================================
+  // console actions
+  // ==========================================================================
+
+  function selectPath(raw) {
+    var p = Model.normalizePath(raw, home)
+    pathField.text = p
+    targetPath = p
+  }
+
+  onTargetPathChanged: {
+    if (targetPath !== "" && Model.isVaultFile(targetPath))
+      anubis.runInspect(targetPath)
+    else anubis.clearInspect()
+  }
+
+  function toggleRecipient(key) {
+    selection = Model.toggleMember(selection, String(key))
+  }
+
+  function runEncrypt() {
+    focusRequest = "encrypt"
+    anubis.submit(anubis.buildRequest("encrypt", targetPath, selectedKeys,
+                                      signRequested, effectiveIdentity, ""))
+  }
+
+  function runDecrypt() {
+    focusRequest = "decrypt"
+    anubis.submit(anubis.buildRequest("decrypt", targetPath, [], false,
+                                      effectiveIdentity, ""))
+  }
+
+  // Tone names come from Model; the palette lives here. "notice" is
+  // deliberately a readable neutral -- not accent, which would read as
+  // verified, and not urgent, which would read as tampering.
+  function toneColor(tone) {
+    if (tone === "good") return root.accent
+    if (tone === "bad") return root.urgent
+    if (tone === "notice") return Qt.alpha(root.fg, 0.85)
+    if (tone === "unknown") return Qt.alpha(root.fg, 0.5)
+    return root.fg
+  }
+
+  // ==========================================================================
+  // wiring
+  // ==========================================================================
+
+  Service {
+    id: anubis
+    settings: root.pluginSettings
+
+    onOperationFinished: function (kind, ok) {
+      activityStrip.requestPaint()
+      if (ok && kind === "encrypt") root.selectPath(anubis.opOutput)
+    }
+    onIdentityCreated: function (name) {
+      root.newIdentityName = ""
+      root.chosenIdentity = name
+    }
+    onStatusChanged: activityStrip.requestPaint()
+  }
+
+  FileView {
+    id: shellSettings
+    path: root.home + "/.config/omarchy/shell.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.applySettings(text())
+    onFileChanged: settingsSettle.restart()
+  }
+
+  Timer {
+    id: settingsSettle
+    interval: 200
+    repeat: false
+    onTriggered: {
+      shellSettings.reload()
+      root.applySettings(shellSettings.text())
+    }
+  }
+
+  Timer {
+    id: pathSettle
+    interval: 350
+    repeat: false
+    onTriggered: root.targetPath = Model.normalizePath(pathField.text, root.home)
+  }
+
+  Timer {
+    interval: 1000
+    running: root.opened
+    repeat: true
+    onTriggered: root.nowMs = Date.now()
+  }
+
+  IpcHandler {
+    target: "anubis"
+    function open(): void { root.open("{}") }
+    function close(): void { root.dismiss() }
+    function show(): void { root.open("{}") }
+    function hide(): void { root.dismiss() }
+    function toggle(): void { root.opened ? root.dismiss() : root.open("{}") }
+    function poll(): string { anubis.refresh(); return "polling" }
+    function vaultState(): string { return root.vaultState }
+    function inspect(path: string): string {
+      root.open(JSON.stringify({ path: path }))
+      return "inspecting"
+    }
+  }
+
+  // ==========================================================================
+  // inline building blocks
+  // ==========================================================================
+
+  // Body copy. One step up from the old caption default, because a surface
+  // where every string is the same size has no headings, only bold ones.
+  component Mono: Text {
+    textFormat: Text.PlainText
+    renderType: Text.NativeRendering
+    font.family: root.fontFamily
+    font.pixelSize: root.typeBody
+    color: Qt.alpha(root.fg, 0.72)
+  }
+
+  // Metadata: timestamps, paths, units, provenance. Anything the eye should
+  // be able to skip on the way to the value it came for.
+  component Meta: Mono {
+    font.pixelSize: root.typeMeta
+    color: Qt.alpha(root.fg, 0.42)
+  }
+
+  // The one treatment for every sub-heading inside a card -- GENERATE
+  // IDENTITY, RECIPIENTS, STANZAS, ACTIVITY. They used to be four
+  // independently invented styles that happened to look similar; now they are
+  // one, a clear step below a card title.
+  component Legend: Mono {
+    font.pixelSize: root.typeMeta
+    font.bold: true
+    font.letterSpacing: 1.1
+    color: Qt.alpha(root.fg, 0.44)
+  }
+
+  component SectionCard: Rectangle {
+    id: card
+    property string title: ""
+    property string note: ""
+    // The centre console sets this. An emphasised card carries an accent
+    // hairline along its top edge and a fractionally brighter field, which is
+    // how the primary workspace says so without growing or shouting.
+    property bool emphasis: false
+    // The rails set this. The record and the vault are reference material, not
+    // the workspace, so they sit on a fainter field with a fainter edge and a
+    // quieter title. Three cards of identical weight either side of the
+    // console is what made the rails compete with it.
+    property bool recessed: false
+    property color tint: Qt.alpha(root.fg, card.recessed ? 0.02 : 0.035)
+    property color edge: Qt.alpha(root.fg, card.recessed ? 0.06 : 0.09)
+    // A floor for the whole card, so one that is deliberately waiting for
+    // input reads as a well rather than as a collapsed strip.
+    property int minHeight: 0
+    default property alias content: cardBody.data
+
+    radius: Style.cornerRadius
+    color: card.tint
+    border.color: card.emphasis ? Qt.alpha(root.accent, 0.22) : card.edge
+    border.width: 1
+    implicitHeight: Math.max(card.minHeight,
+                             cardOuter.implicitHeight + (root.padCard * 2))
+
+    Behavior on color {
+      enabled: root.motion
+      ColorAnimation { duration: root.motionBase; easing.type: Easing.OutQuart }
+    }
+    Behavior on border.color {
+      enabled: root.motion
+      ColorAnimation { duration: root.motionBase; easing.type: Easing.OutQuart }
+    }
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: 1
+      height: 2
+      visible: card.emphasis
+      color: Qt.alpha(root.accent, 0.55)
+    }
+
+    Column {
+      id: cardOuter
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.padCard
+      spacing: root.padGroup
+
+      // Header band. The rule under the title is what makes a card title read
+      // as a title at a glance instead of as the first line of its contents.
+      Column {
+        width: cardOuter.width
+        visible: card.title !== ""
+        spacing: root.padLine
+
+        // The note is a count or a filename -- a fact. The title is a fixed
+        // string the reader already knows. So the note keeps its natural width
+        // and the title is what gives way, rather than the other way round,
+        // which is how "25 recorded" was reaching the reader as "25 ...ded".
+        Item {
+          width: parent.width
+          height: cardTitle.implicitHeight
+          Mono {
+            id: cardTitle
+            anchors.left: parent.left
+            anchors.right: cardNote.left
+            anchors.rightMargin: root.padCard
+            anchors.verticalCenter: parent.verticalCenter
+            elide: Text.ElideRight
+            text: card.title
+            font.pixelSize: root.typeLead
+            font.bold: true
+            font.letterSpacing: 0.6
+            color: card.emphasis ? Qt.alpha(root.fg, 0.88)
+              : Qt.alpha(root.fg, card.recessed ? 0.5 : 0.6)
+          }
+          Meta {
+            id: cardNote
+            anchors.right: parent.right
+            anchors.baseline: cardTitle.baseline
+            width: Math.min(implicitWidth, parent.width * 0.42)
+            horizontalAlignment: Text.AlignRight
+            elide: Text.ElideMiddle
+            text: card.note
+            color: Qt.alpha(root.fg, 0.38)
+          }
+        }
+        Rectangle {
+          width: parent.width
+          height: 1
+          color: card.emphasis ? Qt.alpha(root.accent, 0.20)
+                               : Qt.alpha(root.fg, 0.08)
+        }
+      }
+
+      Column {
+        id: cardBody
+        width: cardOuter.width
+        spacing: root.padGroup
+      }
+    }
+  }
+
+  // What a section looks like before it holds anything.
+  //
+  // A brand-new vault has zero identities, zero recipients and an empty audit
+  // log, and four cards each containing one dim paragraph is not a first run,
+  // it is a wall of apology. So an empty section states what it is for, then
+  // names the one action that fills it -- in the accent colour, because the
+  // next step is the only thing on an empty surface worth looking at.
+  component EmptyWell: Rectangle {
+    id: well
+    property string glyph: ""
+    property string headline: ""
+    property string body: ""
+    property string nextStep: ""
+    property string nextStepGlyph: Model.GLYPH.plus
+    property bool actionable: true
+
+    width: parent ? parent.width : 0
+    implicitHeight: wellCol.implicitHeight + (root.padCard * 2)
+    radius: Style.cornerRadius
+    color: Qt.alpha(root.fg, 0.02)
+    border.color: Qt.alpha(root.fg, 0.07)
+    border.width: 1
+
+    Column {
+      id: wellCol
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.margins: root.padCard
+      spacing: root.padLine
+
+      Row {
+        spacing: root.padGroup
+        Mono {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: well.glyph !== ""
+          text: well.glyph
+          font.pixelSize: root.typeBrand
+          color: Qt.alpha(root.fg, 0.28)
+        }
+        Mono {
+          anchors.verticalCenter: parent.verticalCenter
+          text: well.headline
+          font.bold: true
+          color: Qt.alpha(root.fg, 0.6)
+        }
+      }
+      Meta {
+        width: wellCol.width
+        wrapMode: Text.WordWrap
+        visible: well.body !== ""
+        text: well.body
+        color: Qt.alpha(root.fg, 0.45)
+      }
+      Item { width: 1; height: root.padTight; visible: well.nextStep !== "" }
+      Mono {
+        width: wellCol.width
+        wrapMode: Text.WordWrap
+        visible: well.nextStep !== ""
+        text: well.nextStepGlyph + "  " + well.nextStep
+        font.bold: true
+        color: well.actionable ? Qt.alpha(root.accent, 0.9)
+                               : Qt.alpha(root.fg, 0.5)
+      }
+    }
+  }
+
+  component Chip: Rectangle {
+    id: chip
+    property string label: ""
+    property color tone: root.fg
+    property bool solid: false
+    implicitWidth: chipText.implicitWidth + (root.padCard * 2)
+    implicitHeight: chipText.implicitHeight + (root.padLine * 2)
+    radius: height / 2
+    color: Qt.alpha(chip.tone, chip.solid ? 0.18 : 0.06)
+    border.color: Qt.alpha(chip.tone, chip.solid ? 0.55 : 0.30)
+    border.width: 1
+
+    Behavior on color {
+      enabled: root.motion
+      ColorAnimation { duration: root.motionFast; easing.type: Easing.OutQuart }
+    }
+    Behavior on border.color {
+      enabled: root.motion
+      ColorAnimation { duration: root.motionFast; easing.type: Easing.OutQuart }
+    }
+
+    Mono {
+      id: chipText
+      anchors.centerIn: parent
+      text: chip.label
+      font.pixelSize: root.typeMeta
+      color: chip.tone
+      font.bold: chip.solid
+    }
+  }
+
+  // Reachable by mouse and by keyboard. Tab order is document order, which on
+  // this surface runs left rail, console, right rail -- the same order the eye
+  // takes -- so no explicit KeyNavigation chain is needed. An unavailable
+  // button drops out of the tab ring entirely rather than accepting focus and
+  // then refusing to fire.
+  component ActionButton: Rectangle {
+    id: btn
+    property string label: ""
+    property string glyph: ""
+    property bool available: true
+    property bool primary: false
+    property color tone: btn.primary ? root.accent : root.fg
+    signal activated
+
+    implicitWidth: btnRow.implicitWidth + (root.padCard * 2)
+    implicitHeight: btnRow.implicitHeight + (root.padGroup * 2) - root.padTight
+    width: implicitWidth
+    height: implicitHeight
+    radius: Style.cornerRadius
+    opacity: btn.available ? 1.0 : 0.35
+    activeFocusOnTab: btn.available
+    color: !btn.available ? Qt.alpha(root.fg, 0.04)
+      : (btnArea.containsMouse ? Qt.alpha(btn.tone, 0.22)
+                               : Qt.alpha(btn.tone, btn.primary ? 0.11 : 0.07))
+    border.color: btn.activeFocus ? btn.tone
+      : Qt.alpha(btn.tone, btn.available ? (btn.primary ? 0.5 : 0.32) : 0.18)
+    border.width: 1
+
+    Keys.onPressed: function (event) {
+      if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter
+          && event.key !== Qt.Key_Space) return
+      if (btn.available) btn.activated()
+      event.accepted = true
+    }
+
+    Behavior on color {
+      enabled: root.motion
+      ColorAnimation { duration: root.motionFast; easing.type: Easing.OutQuart }
+    }
+    Behavior on border.color {
+      enabled: root.motion
+      ColorAnimation { duration: root.motionFast; easing.type: Easing.OutQuart }
+    }
+
+    // Focus ring, drawn outside the border so it reads as a ring rather than
+    // as a thicker button. Keyboard focus has to be visible or the shortcut
+    // legend below is a promise the surface does not keep.
+    Rectangle {
+      anchors.fill: parent
+      anchors.margins: -root.padTight
+      radius: Style.cornerRadius
+      color: "transparent"
+      border.color: Qt.alpha(btn.tone, 0.55)
+      border.width: 1
+      visible: opacity > 0
+      opacity: btn.activeFocus ? 1.0 : 0.0
+      Behavior on opacity {
+        enabled: root.motion
+        NumberAnimation { duration: root.motionFast; easing.type: Easing.OutQuart }
+      }
+    }
+
+    Row {
+      id: btnRow
+      anchors.centerIn: parent
+      spacing: root.padGroup - root.padTight
+      Mono {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: btn.glyph !== ""
+        text: btn.glyph
+        color: btn.tone
+        font.pixelSize: root.typeBody
+      }
+      Mono {
+        anchors.verticalCenter: parent.verticalCenter
+        text: btn.label
+        color: btn.tone
+        font.pixelSize: root.typeBody
+        font.bold: btn.primary
+      }
+    }
+
+    MouseArea {
+      id: btnArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: btn.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: {
+        if (!btn.available) return
+        btn.forceActiveFocus()
+        btn.activated()
+      }
+    }
+  }
+
+  // A fingerprint rendered as the handle it is: five groups of four, short
+  // enough to read aloud, which is the whole point of it. The full key, where
+  // one exists, is reachable only through the explicit copy action beside it.
+  //
+  // Three rules are load-bearing here.
+  //
+  // The KIND is always shown. There are two fingerprint namespaces -- one over
+  // the KEM recipient payload, one over the ML-DSA-87 verifying key -- and
+  // they are not interchangeable. A bare fingerprint invites someone to
+  // compare a recipient against a signer and conclude something false, so no
+  // fingerprint is ever painted without saying which kind it is.
+  //
+  // The fingerprint gets its own line, under the label rather than beside it.
+  // Twenty-four characters plus a label plus an action does not fit a rail at
+  // every font size the theme allows, and the failure mode of trying is an
+  // ELIDED fingerprint -- worse than none, because it silently invites exactly
+  // the mistaken-identity error the fingerprint exists to prevent. Its own
+  // line makes truncation impossible instead of unlikely.
+  //
+  // The five groups are painted as five texts against dim separators rather
+  // than as one dashed string. Comparing two of these aloud or by eye is the
+  // entire job, and grouping is what makes that survivable; the plate around
+  // them says the whole thing is one copyable object.
+  component FingerprintRow: Item {
+    id: fpRow
+    property string kind: "recipient"
+    property string fingerprint: ""
+    property string fullKey: ""
+    readonly property bool known: fpRow.fingerprint !== ""
+    implicitHeight: fpHead.height + fpPlate.implicitHeight + root.padTight
+
+    // Line one names the namespace and offers the full key where there is one.
+    Item {
+      id: fpHead
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      height: fpKind.implicitHeight
+
+      Mono {
+        id: fpGlyph
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: Model.GLYPH.fingerprint
+        font.pixelSize: root.typeMeta
+        color: Qt.alpha(root.fg, 0.38)
+      }
+      Legend {
+        id: fpKind
+        anchors.left: fpGlyph.right
+        anchors.leftMargin: root.padLine + root.padTight
+        anchors.right: keyArea.left
+        anchors.rightMargin: root.padGroup
+        anchors.verticalCenter: parent.verticalCenter
+        elide: Text.ElideRight
+        text: fpRow.kind
+      }
+
+      MouseArea {
+        id: keyArea
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: copyKey.visible ? copyKey.implicitWidth : 0
+        hoverEnabled: true
+        enabled: copyKey.visible
+        cursorShape: Qt.PointingHandCursor
+        onClicked: anubis.copyText(fpRow.fullKey,
+                                   "full " + fpRow.kind + " key")
+        Meta {
+          id: copyKey
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          visible: fpRow.fullKey !== ""
+          text: Model.GLYPH.copy + " key"
+          color: keyArea.containsMouse ? root.accent : Qt.alpha(root.fg, 0.38)
+          Behavior on color {
+            enabled: root.motion
+            ColorAnimation { duration: root.motionFast }
+          }
+        }
+      }
+    }
+
+    // Line two: the plate, indented to the label's text column so the two
+    // lines share one left edge instead of nearly sharing one.
+    //
+    // The digits are ONE Text, not a row of per-group items: a Row overflows
+    // the rail and a Flow, measured here, will not fill an anchor-derived
+    // width at all, and both failure modes end in a fingerprint the reader
+    // cannot fully see -- the same silent half-truth as an elide.
+    //
+    // Twenty-four characters at the shipped theme (20px base font, 1.67
+    // spacing scale) measures about 266px against roughly 230px of plate, so
+    // this does not fit one line and no amount of tightening makes it. Rather
+    // than let the wrap fall mid-group, fpMetrics measures the string and asks
+    // Model for a break on the group-three boundary: 14 characters over 9,
+    // both lines starting on a digit. A theme with room gets one line.
+    // WrapAnywhere stays on underneath as the guarantee that nothing is ever
+    // lost, whatever a theme does.
+    //
+    // The dim separators are StyledText, safe because
+    // Model.fingerprintMarkup rebuilds the value out of hex and dashes only.
+    TextMetrics {
+      id: fpMetrics
+      font: fpDigits.font
+      text: fpRow.fingerprint
+    }
+    Rectangle {
+      id: fpPlate
+      anchors.left: parent.left
+      anchors.leftMargin: fpGlyph.implicitWidth + root.padLine + root.padTight
+      anchors.right: parent.right
+      anchors.top: fpHead.bottom
+      anchors.topMargin: root.padTight
+      implicitHeight: fpDigits.implicitHeight + (root.padLine * 2)
+      radius: Style.cornerRadius
+      color: fpArea.containsMouse ? Qt.alpha(root.accent, 0.10)
+        : Qt.alpha(root.fg, fpRow.known ? 0.05 : 0.02)
+      border.color: fpArea.containsMouse ? Qt.alpha(root.accent, 0.45)
+        : Qt.alpha(root.fg, fpRow.known ? 0.10 : 0.06)
+      border.width: 1
+
+      Behavior on color {
+        enabled: root.motion
+        ColorAnimation { duration: root.motionFast }
+      }
+      Behavior on border.color {
+        enabled: root.motion
+        ColorAnimation { duration: root.motionFast }
+      }
+
+      Mono {
+        id: fpDigits
+        anchors.left: parent.left
+        anchors.leftMargin: root.padGroup - root.padTight
+        anchors.right: parent.right
+        anchors.rightMargin: root.padGroup - root.padTight
+        anchors.verticalCenter: parent.verticalCenter
+        textFormat: fpRow.known ? Text.StyledText : Text.PlainText
+        wrapMode: Text.WrapAnywhere
+        // The engine did not state one. Said plainly, in the dim weight that
+        // means absent, never dressed up as a value.
+        text: fpRow.known
+          ? Model.fingerprintMarkup(fpRow.fingerprint,
+                                    Qt.alpha(root.fg, 0.3).toString(),
+                                    fpMetrics.width > fpDigits.width ? 3 : 0)
+          : "not reported"
+        font.bold: fpRow.known
+        font.pixelSize: fpRow.known ? root.typeBody : root.typeMeta
+        font.letterSpacing: fpRow.known ? 0.5 : 0
+        color: fpRow.known
+          ? (fpArea.containsMouse ? root.accent : Qt.alpha(root.fg, 0.92))
+          : Qt.alpha(root.fg, 0.42)
+        Behavior on color {
+          enabled: root.motion
+          ColorAnimation { duration: root.motionFast }
+        }
+      }
+
+      // Sits in the slack the shorter second line leaves rather than reserving
+      // a column beside the digits: thirty pixels of permanently blank rail is
+      // what pushed the wrap in the first place.
+      Meta {
+        id: copyHint
+        anchors.right: parent.right
+        anchors.rightMargin: root.padLine
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: root.padTight
+        visible: opacity > 0
+        opacity: fpArea.containsMouse && fpRow.known ? 1.0 : 0.0
+        text: Model.GLYPH.copy
+        color: root.accent
+        Behavior on opacity {
+          enabled: root.motion
+          NumberAnimation { duration: root.motionFast }
+        }
+      }
+    }
+
+    MouseArea {
+      id: fpArea
+      anchors.fill: fpPlate
+      hoverEnabled: true
+      enabled: fpRow.known
+      cursorShape: Qt.PointingHandCursor
+      onClicked: anubis.copyText(fpRow.fingerprint,
+                                 fpRow.kind + " fingerprint")
+    }
+  }
+
+  // Label left, value right, both sitting on ONE baseline rather than each
+  // vertically centred in its own half. Centring two texts of different sizes
+  // against each other is what made these rows read as slightly crooked.
+  component FieldRow: Item {
+    id: kv
+    property string label: ""
+    property string value: ""
+    property string tone: "neutral"
+    property bool strong: false
+    implicitHeight: Math.max(kvLabel.implicitHeight, kvValue.implicitHeight)
+      + root.padTight
+
+    Meta {
+      id: kvLabel
+      anchors.left: parent.left
+      anchors.top: parent.top
+      text: kv.label
+      color: Qt.alpha(root.fg, 0.45)
+    }
+    Mono {
+      id: kvValue
+      anchors.right: parent.right
+      anchors.left: kvLabel.right
+      anchors.leftMargin: root.padCard
+      anchors.baseline: kvLabel.baseline
+      horizontalAlignment: Text.AlignRight
+      elide: Text.ElideMiddle
+      text: kv.value
+      color: root.toneColor(kv.tone)
+      font.bold: kv.strong || kv.tone === "good" || kv.tone === "bad"
+    }
+  }
+
+  // ==========================================================================
+  // the window
+  // ==========================================================================
+
+  PanelWindow {
+    id: win
+    visible: root.opened
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: Color.background
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "anubis-vault"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+
+    // The overlay arrives rather than appearing: a short fade with a small
+    // rise, so the eye knows where it came from. It is opacity and one
+    // transform, nothing that reflows, and the keyboard grab is already live
+    // while it plays -- typing during the fade is never dropped.
+    Item {
+      id: keyCatcher
+      anchors.fill: parent
+      focus: true
+      opacity: root.opened ? 1.0 : 0.0
+      transform: Translate { y: keyCatcher.opacity < 1 ? root.padRail : 0 }
+      Behavior on opacity {
+        enabled: root.motion
+        NumberAnimation {
+          duration: root.motionBase
+          easing.type: Easing.OutQuart
+        }
+      }
+      Keys.priority: Keys.BeforeItem
+      Keys.onPressed: function (event) {
+        if (event.key === Qt.Key_Escape) {
+          if (anubis.pendingOverwrite) anubis.cancelPending()
+          else root.dismiss()
+          event.accepted = true
+          return
+        }
+        if (!(event.modifiers & Qt.ControlModifier)) return
+        if (event.key === Qt.Key_E) {
+          root.focusRequest = "encrypt"
+          pathField.forceActiveFocus()
+          pathField.selectAll()
+          event.accepted = true
+        } else if (event.key === Qt.Key_D) {
+          root.focusRequest = "decrypt"
+          pathField.forceActiveFocus()
+          pathField.selectAll()
+          event.accepted = true
+        } else if (event.key === Qt.Key_G) {
+          root.focusRequest = "keygen"
+          identityNameField.forceActiveFocus()
+          event.accepted = true
+        } else if (event.key === Qt.Key_R) {
+          anubis.refresh()
+          event.accepted = true
+        }
+      }
+
+      // ------------------------------------------------------------- header
+      Item {
+        id: header
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: root.padRail
+        height: Style.spacing.controlHeight + root.padCard
+
+        // The brand rail is clipped against the action rail rather than
+        // allowed to run under it: on a narrow display the FIPS chips drop
+        // off the end instead of painting over the close button.
+        Item {
+          id: brandClip
+          anchors.left: parent.left
+          anchors.right: headerActions.left
+          anchors.rightMargin: root.padRail
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          clip: true
+
+          Row {
+            id: brand
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: root.padCard
+
+            Mono {
+              anchors.verticalCenter: parent.verticalCenter
+              text: Model.GLYPH.shieldKey
+              color: brandArea.containsMouse ? root.accent : root.fg
+              font.pixelSize: Style.font.heading
+            }
+            Mono {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "ANUBIS"
+              color: brandArea.containsMouse ? root.accent : root.fg
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+            Mono {
+              anchors.verticalCenter: parent.verticalCenter
+              text: anubis.version !== "" ? "v" + anubis.version
+                : (anubis.engineMissing ? "engine absent" : "version unknown")
+              color: Qt.alpha(root.fg, 0.45)
+            }
+            Rectangle {
+              anchors.verticalCenter: parent.verticalCenter
+              width: 1
+              height: Style.spacing.xl
+              color: Qt.alpha(root.fg, 0.18)
+            }
+            Chip {
+              anchors.verticalCenter: parent.verticalCenter
+              label: Model.suiteBadge(anubis.suite)
+              tone: anubis.engineMissing ? Qt.alpha(root.fg, 0.5) : root.accent
+              solid: true
+            }
+            Repeater {
+              model: Model.fipsChips(anubis.suite)
+              delegate: Chip {
+                required property var modelData
+                anchors.verticalCenter: parent.verticalCenter
+                label: modelData
+                tone: Qt.alpha(root.fg, 0.7)
+              }
+            }
+          }
+
+          MouseArea {
+            id: brandArea
+            anchors.left: parent.left
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: Math.min(brand.implicitWidth, brandClip.width)
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.dismiss()
+          }
+        }
+
+        Row {
+          id: headerActions
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: root.padCard
+
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.spacing.md
+            height: width
+            radius: width / 2
+            color: root.vaultState === "absent" ? Qt.alpha(root.fg, 0.3)
+              : (root.vaultState === "failed" || root.vaultState === "error"
+                 ? root.urgent
+                 : (root.vaultState === "unknown" ? Qt.alpha(root.fg, 0.55)
+                                                  : root.accent))
+          }
+          ActionButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: Model.GLYPH.refresh
+            label: anubis.statusBusy ? "polling" : "poll"
+            available: !anubis.engineMissing
+            onActivated: anubis.refresh()
+          }
+          ActionButton {
+            anchors.verticalCenter: parent.verticalCenter
+            glyph: Model.GLYPH.close
+            label: "close"
+            onActivated: root.dismiss()
+          }
+        }
+      }
+
+      // ------------------------------------------------------------- footer
+      Item {
+        id: footer
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: root.padRail
+        height: footerCol.implicitHeight
+
+        Column {
+          id: footerCol
+          anchors.left: parent.left
+          anchors.right: parent.right
+          spacing: root.padGroup
+
+          Rectangle {
+            width: footerCol.width
+            height: 1
+            color: Qt.alpha(root.fg, 0.10)
+          }
+          Meta {
+            width: footerCol.width
+            wrapMode: Text.WordWrap
+            text: Model.GLYPH.info + "  " + Model.assuranceLine()
+            color: Qt.alpha(root.fg, 0.5)
+          }
+          // Key caps, not a sentence of pipes. A shortcut legend that reads as
+          // one dim run-on line is a legend nobody uses; the key is the thing
+          // being named, so it gets the plate and the label sits beside it.
+          Flow {
+            width: footerCol.width
+            spacing: root.padRail
+
+            Repeater {
+              model: [
+                { key: "Esc", what: "close" },
+                { key: "Ctrl+E", what: "encrypt" },
+                { key: "Ctrl+D", what: "decrypt" },
+                { key: "Ctrl+G", what: "generate identity" },
+                { key: "Ctrl+R", what: "poll" },
+                { key: "Tab", what: "walk the controls" },
+                { key: "click", what: "a fingerprint copies it" }
+              ]
+              delegate: Row {
+                required property var modelData
+                spacing: root.padGroup
+
+                Rectangle {
+                  anchors.verticalCenter: parent.verticalCenter
+                  implicitWidth: capText.implicitWidth + (root.padGroup * 2)
+                  implicitHeight: capText.implicitHeight + root.padLine
+                  radius: Style.cornerRadius
+                  color: Qt.alpha(root.fg, 0.05)
+                  border.color: Qt.alpha(root.fg, 0.16)
+                  border.width: 1
+                  Meta {
+                    id: capText
+                    anchors.centerIn: parent
+                    text: String(parent.parent.modelData.key)
+                    font.bold: true
+                    color: Qt.alpha(root.fg, 0.6)
+                  }
+                }
+                Meta {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: String(parent.modelData.what)
+                  color: Qt.alpha(root.fg, 0.38)
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // --------------------------------------------------------------- body
+      Item {
+        id: body
+        anchors.top: header.bottom
+        anchors.bottom: footer.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.margins: root.padRail
+        anchors.topMargin: root.padGroup
+        anchors.bottomMargin: root.padGroup
+
+        readonly property real gap: root.padRail
+        readonly property var cols: Model.columnWidths(width, gap)
+
+        // ======================================================== LEFT RAIL
+        Flickable {
+          id: leftScroll
+          width: body.cols.left
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          anchors.left: parent.left
+          contentWidth: width
+          contentHeight: leftPane.implicitHeight
+          clip: true
+          pixelAligned: true
+          boundsBehavior: Flickable.StopAtBounds
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: leftPane
+            width: leftScroll.width - root.padGroup
+            spacing: body.gap
+
+            // --------------------------------------------- identity vault
+            SectionCard {
+              width: leftPane.width
+              recessed: true
+              title: Model.GLYPH.accountKey + "  IDENTITY VAULT"
+              note: anubis.identities.length
+                + (anubis.identities.length === 1 ? " key" : " keys")
+
+              EmptyWell {
+                visible: anubis.identities.length === 0
+                glyph: Model.GLYPH.accountKey
+                headline: anubis.engineMissing ? "no engine" : "no identity yet"
+                body: anubis.engineMissing
+                  ? "Identities live in files the engine writes. Without the "
+                    + "engine there is nothing to list."
+                  : "An identity is one file holding X25519, ML-KEM-1024 and "
+                    + "ML-DSA-87 material. It is what lets you decrypt, and "
+                    + "what other people encrypt to."
+                nextStep: anubis.engineMissing
+                  ? "install the engine first -- the console has the command"
+                  : "name one below and press generate. Ctrl+G jumps there."
+                nextStepGlyph: anubis.engineMissing ? Model.GLYPH.alert
+                                                    : Model.GLYPH.plus
+                actionable: !anubis.engineMissing
+              }
+
+              Repeater {
+                model: anubis.identities
+                delegate: Rectangle {
+                  id: idCard
+                  required property var modelData
+                  readonly property bool chosen:
+                    root.effectiveIdentity === String(idCard.modelData.name)
+                  width: parent.width
+                  implicitHeight: idCol.implicitHeight + (root.padCard * 2)
+                  radius: Style.cornerRadius
+                  color: idCard.chosen ? Qt.alpha(root.accent, 0.08)
+                                       : Qt.alpha(root.fg, 0.03)
+                  border.color: idCard.chosen ? Qt.alpha(root.accent, 0.4)
+                                              : Qt.alpha(root.fg, 0.12)
+                  border.width: 1
+
+                  Column {
+                    id: idCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: root.padCard
+                    spacing: root.padLine
+
+                    Item {
+                      width: idCol.width
+                      height: idName.implicitHeight
+                      Mono {
+                        id: idName
+                        anchors.left: parent.left
+                        anchors.right: idUse.left
+                        anchors.rightMargin: root.padGroup
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideMiddle
+                        text: Model.GLYPH.key + "  "
+                          + String(idCard.modelData.name)
+                        color: idCard.chosen ? root.accent : root.fg
+                        font.bold: true
+                        font.pixelSize: root.typeLead
+                      }
+                      Meta {
+                        id: idUse
+                        anchors.right: parent.right
+                        anchors.baseline: idName.baseline
+                        text: idCard.chosen ? "IN USE" : "select"
+                        font.bold: idCard.chosen
+                        font.letterSpacing: idCard.chosen ? 1.1 : 0
+                        color: idCard.chosen ? root.accent
+                          : (idSelect.containsMouse ? root.fg
+                                                    : Qt.alpha(root.fg, 0.35))
+                      }
+                      MouseArea {
+                        id: idSelect
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.chosenIdentity =
+                          String(idCard.modelData.name)
+                      }
+                    }
+
+                    // Both namespaces, each labelled. The recipient
+                    // fingerprint is what someone encrypts TO; the signer
+                    // fingerprint is what they check a signature AGAINST.
+                    // Showing them together, named, is what stops anyone
+                    // comparing one against the other.
+                    FingerprintRow {
+                      width: idCol.width
+                      kind: "recipient"
+                      fingerprint: Model.formatFingerprint(
+                        idCard.modelData.fingerprint)
+                      fullKey: String(idCard.modelData.recipient || "")
+                    }
+                    FingerprintRow {
+                      width: idCol.width
+                      visible: Model.signingFingerprint(idCard.modelData) !== ""
+                      kind: "signer"
+                      fingerprint: Model.signingFingerprint(idCard.modelData)
+                      fullKey: ""
+                    }
+
+                    FieldRow {
+                      width: idCol.width
+                      label: "created"
+                      value: Model.stampLocal(idCard.modelData.created) || "--"
+                    }
+                    FieldRow {
+                      width: idCol.width
+                      label: "signing"
+                      value: idCard.modelData.signing === true
+                        ? "ML-DSA-87 key" : "none"
+                      tone: idCard.modelData.signing === true
+                        ? "good" : "unknown"
+                    }
+                    Meta {
+                      width: idCol.width
+                      elide: Text.ElideMiddle
+                      text: String(idCard.modelData.path || "")
+                      color: Qt.alpha(root.fg, 0.3)
+                    }
+                  }
+                }
+              }
+
+              Rectangle {
+                width: parent.width
+                height: 1
+                color: Qt.alpha(root.fg, 0.08)
+              }
+
+              Legend {
+                width: parent.width
+                text: "GENERATE IDENTITY"
+              }
+              // Field over button rather than beside it. Side by side, the
+              // button's label pushed the field down to about ninety pixels,
+              // which elided its own placeholder -- a form field that cannot
+              // show what it wants.
+              Column {
+                width: parent.width
+                spacing: root.padLine
+
+                TextField {
+                  id: identityNameField
+                  width: parent.width
+                  placeholderText: "identity name"
+                  font.pixelSize: root.typeBody
+                  verticalPadding: root.padLine + root.padTight
+                  text: root.newIdentityName
+                  onTextChanged: root.newIdentityName = text
+                  onAccepted: anubis.generateIdentity(root.newIdentityName)
+                }
+                Item {
+                  width: parent.width
+                  height: genButton.implicitHeight
+                  ActionButton {
+                    id: genButton
+                    anchors.left: parent.left
+                    glyph: Model.GLYPH.plus
+                    label: "generate"
+                    primary: anubis.identities.length === 0
+                    available: !anubis.engineMissing && !anubis.actionBusy
+                      && Model.validIdentityName(root.newIdentityName)
+                    onActivated: anubis.generateIdentity(root.newIdentityName)
+                  }
+                  // Why the button is refusing, said where the refusal is,
+                  // instead of leaving a dimmed control with no explanation.
+                  Meta {
+                    anchors.left: genButton.right
+                    anchors.leftMargin: root.padGroup
+                    anchors.right: parent.right
+                    anchors.verticalCenter: genButton.verticalCenter
+                    horizontalAlignment: Text.AlignRight
+                    wrapMode: Text.WordWrap
+                    visible: !anubis.engineMissing && !genButton.available
+                      && !anubis.actionBusy
+                    text: root.newIdentityName === ""
+                      ? "needs a name" : "letters, digits, - and _ only"
+                    color: Qt.alpha(root.fg, 0.38)
+                  }
+                }
+              }
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Signing is chosen per file at encrypt time, never at "
+                  + "keygen: every identity already holds the ML-DSA-87 key."
+                color: Qt.alpha(root.fg, 0.32)
+              }
+            }
+
+            // ---------------------------------------- recipient address book
+            SectionCard {
+              width: leftPane.width
+              recessed: true
+              title: Model.GLYPH.keyChain + "  ADDRESS BOOK"
+              note: anubis.recipients.length
+                + (anubis.recipients.length === 1 ? " entry" : " entries")
+
+              // With an identity already in hand, an empty address book is not
+              // a dead end: encrypting to yourself works right now. Saying so
+              // is the difference between an empty section and a blocked one.
+              EmptyWell {
+                visible: anubis.recipients.length === 0
+                glyph: Model.GLYPH.keyChain
+                headline: anubis.engineMissing ? "no engine" : "no one else yet"
+                body: anubis.engineMissing
+                  ? "The address book is a file the engine owns. Without the "
+                    + "engine there is nothing to read."
+                  : "The book holds other people's public recipient keys, so "
+                    + "you pick them by label instead of by 2573 characters."
+                nextStep: anubis.engineMissing
+                  ? "install the engine first"
+                  : (anubis.identities.length > 0
+                     ? "you can already encrypt to yourself -- the self chip "
+                       + "in the console. Paste someone else's anubis1 key "
+                       + "below to add them."
+                     : "paste an anubis1 key below, or generate an identity "
+                       + "first and encrypt to yourself.")
+                nextStepGlyph: anubis.engineMissing ? Model.GLYPH.alert
+                                                    : Model.GLYPH.plus
+                actionable: !anubis.engineMissing
+              }
+
+              Repeater {
+                model: anubis.recipients
+                delegate: Rectangle {
+                  id: recCard
+                  required property var modelData
+                  readonly property string recKey:
+                    String(recCard.modelData.key || "")
+                  readonly property bool picked:
+                    Model.isMember(root.selection, recCard.recKey)
+                  width: parent.width
+                  implicitHeight: recCol.implicitHeight + (root.padCard * 2)
+                  radius: Style.cornerRadius
+                  color: recCard.picked ? Qt.alpha(root.accent, 0.08)
+                                        : Qt.alpha(root.fg, 0.03)
+                  border.color: recCard.picked ? Qt.alpha(root.accent, 0.4)
+                                               : Qt.alpha(root.fg, 0.12)
+                  border.width: 1
+
+                  Column {
+                    id: recCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: root.padCard
+                    spacing: root.padLine
+
+                    Item {
+                      width: recCol.width
+                      height: recLabel.implicitHeight
+
+                      Rectangle {
+                        id: recBox
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: root.padCard
+                        height: width
+                        radius: Style.cornerRadius
+                        color: recCard.picked ? Qt.alpha(root.accent, 0.35)
+                                              : "transparent"
+                        border.color: recCard.picked
+                          ? root.accent : Qt.alpha(root.fg, 0.35)
+                        border.width: 1
+                        Mono {
+                          anchors.centerIn: parent
+                          visible: recCard.picked
+                          text: Model.GLYPH.check
+                          color: root.accent
+                        }
+                      }
+                      Mono {
+                        id: recLabel
+                        anchors.left: recBox.right
+                        anchors.leftMargin: root.padGroup
+                        anchors.right: recRemoveArea.left
+                        anchors.rightMargin: root.padGroup
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideRight
+                        text: String(recCard.modelData.label || "unlabelled")
+                        color: recCard.picked ? root.accent : root.fg
+                        font.bold: true
+                        font.pixelSize: root.typeLead
+                      }
+                      MouseArea {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.right: recRemoveArea.left
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleRecipient(recCard.recKey)
+                      }
+                      MouseArea {
+                        id: recRemoveArea
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: recRemove.implicitWidth + root.padGroup
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: anubis.removeRecipient(
+                          String(recCard.modelData.label))
+                        Mono {
+                          id: recRemove
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: Model.GLYPH.trash
+                          color: recRemoveArea.containsMouse
+                            ? root.urgent : Qt.alpha(root.fg, 0.3)
+                        }
+                      }
+                    }
+
+                    FingerprintRow {
+                      width: recCol.width
+                      kind: "recipient"
+                      fingerprint: Model.formatFingerprint(
+                        recCard.modelData.fingerprint)
+                      fullKey: recCard.recKey
+                    }
+                  }
+                }
+              }
+
+              Rectangle {
+                width: parent.width
+                height: 1
+                color: Qt.alpha(root.fg, 0.08)
+              }
+
+              Legend {
+                width: parent.width
+                text: "ADD RECIPIENT"
+              }
+              Column {
+                width: parent.width
+                spacing: root.padLine
+
+                TextField {
+                  id: recipientLabelField
+                  width: parent.width
+                  placeholderText: "label"
+                  font.pixelSize: root.typeBody
+                  verticalPadding: root.padLine + root.padTight
+                  text: root.newRecipientLabel
+                  onTextChanged: root.newRecipientLabel = text
+                }
+                TextField {
+                  id: recipientKeyField
+                  width: parent.width
+                  placeholderText: "anubis1... (about 2573 characters)"
+                  font.pixelSize: root.typeBody
+                  verticalPadding: root.padLine + root.padTight
+                  text: root.newRecipientKey
+                  onTextChanged: root.newRecipientKey = text.replace(/\s+/g, "")
+                }
+                Item {
+                  width: parent.width
+                  height: addRecipientButton.implicitHeight
+                  ActionButton {
+                    id: addRecipientButton
+                    anchors.left: parent.left
+                    glyph: Model.GLYPH.plus
+                    label: "add to book"
+                    available: !anubis.engineMissing && !anubis.actionBusy
+                      && Model.recipientRefusal(root.newRecipientLabel,
+                                                root.newRecipientKey,
+                                                anubis.recipients) === ""
+                    onActivated: {
+                      anubis.addRecipient(root.newRecipientLabel,
+                                          root.newRecipientKey)
+                      root.newRecipientLabel = ""
+                      root.newRecipientKey = ""
+                    }
+                  }
+                  Meta {
+                    anchors.left: addRecipientButton.right
+                    anchors.leftMargin: root.padGroup
+                    anchors.right: parent.right
+                    anchors.verticalCenter: addRecipientButton.verticalCenter
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideRight
+                    text: root.newRecipientKey === "" ? ""
+                      : Model.keyLengthNote(root.newRecipientKey)
+                    color: Qt.alpha(root.fg, 0.4)
+                  }
+                }
+              }
+              Mono {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                visible: anubis.actionError !== ""
+                text: Model.GLYPH.alert + "  " + anubis.actionError
+                color: root.urgent
+              }
+              Mono {
+                width: parent.width
+                visible: anubis.actionStatus !== ""
+                text: anubis.actionStatus
+                color: root.accent
+              }
+            }
+          }
+        }
+
+        // =========================================================== CENTRE
+        Flickable {
+          id: centreScroll
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          anchors.left: leftScroll.right
+          anchors.leftMargin: body.gap
+          width: body.cols.centre
+          contentWidth: width
+          contentHeight: centrePane.implicitHeight
+          clip: true
+          pixelAligned: true
+          boundsBehavior: Flickable.StopAtBounds
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: centrePane
+            width: centreScroll.width - root.padGroup
+            spacing: body.gap
+
+            // ----------------------------------------------------- first run
+            //
+            // A brand-new vault has nothing in it, and the console it lands on
+            // has every control disabled: no identity to encrypt from, no
+            // recipient to encrypt to, no container to inspect. Four dim
+            // paragraphs is not an introduction. This card owns the space the
+            // inspector will eventually fill and says, in order, what the
+            // three steps are -- with the current one lit and the rest banked.
+            SectionCard {
+              id: firstRun
+              readonly property bool haveIdentity: anubis.identities.length > 0
+              readonly property bool haveTarget: root.targetPath !== ""
+              width: centrePane.width
+              visible: !anubis.engineMissing
+                && anubis.identities.length === 0
+                && anubis.recipients.length === 0
+              title: Model.GLYPH.shieldKey + "  FIRST RUN"
+              emphasis: true
+
+              Mono {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "This vault is empty. Three steps put a post-quantum "
+                  + "container on disk, and the first one is the only one that "
+                  + "cannot be undone by deleting a file."
+                color: Qt.alpha(root.fg, 0.7)
+              }
+
+              Repeater {
+                model: [
+                  {
+                    n: "1",
+                    head: "generate an identity",
+                    body: "One file holding X25519, ML-KEM-1024 and ML-DSA-87 "
+                      + "material. It is what lets you decrypt later, so back "
+                      + "it up before you rely on it.",
+                    live: !firstRun.haveIdentity
+                  },
+                  {
+                    n: "2",
+                    head: "pick who can read the file",
+                    body: "Your own identity appears in the console as a self "
+                      + "chip, so you can encrypt to yourself immediately. "
+                      + "Other people go in the address book by label.",
+                    live: firstRun.haveIdentity
+                  },
+                  {
+                    n: "3",
+                    head: "drop a file and encrypt",
+                    body: "Drag one onto the target field or type a path. "
+                      + "Signing is chosen here, per file, not at keygen.",
+                    live: firstRun.haveIdentity && firstRun.haveTarget
+                  }
+                ]
+                delegate: Item {
+                  id: step
+                  required property var modelData
+                  readonly property bool live: step.modelData.live === true
+                  width: parent.width
+                  implicitHeight: stepCol.implicitHeight
+
+                  Rectangle {
+                    id: stepBadge
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    width: stepNum.implicitHeight + root.padGroup
+                    height: width
+                    radius: width / 2
+                    color: step.live ? Qt.alpha(root.accent, 0.18)
+                                     : Qt.alpha(root.fg, 0.05)
+                    border.color: step.live ? Qt.alpha(root.accent, 0.55)
+                                            : Qt.alpha(root.fg, 0.14)
+                    border.width: 1
+                    Mono {
+                      id: stepNum
+                      anchors.centerIn: parent
+                      text: String(step.modelData.n)
+                      font.bold: true
+                      color: step.live ? root.accent : Qt.alpha(root.fg, 0.4)
+                    }
+                  }
+
+                  Column {
+                    id: stepCol
+                    anchors.left: stepBadge.right
+                    anchors.leftMargin: root.padCard
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    spacing: root.padTight
+
+                    Mono {
+                      width: stepCol.width
+                      text: String(step.modelData.head)
+                      font.pixelSize: root.typeLead
+                      font.bold: true
+                      color: step.live ? root.accent : Qt.alpha(root.fg, 0.45)
+                    }
+                    Meta {
+                      width: stepCol.width
+                      wrapMode: Text.WordWrap
+                      text: String(step.modelData.body)
+                      color: Qt.alpha(root.fg, step.live ? 0.55 : 0.34)
+                    }
+                  }
+                }
+              }
+
+              // One control, and it escalates rather than duplicating the
+              // canonical form in the left rail. With no name typed it takes
+              // you to the field that wants one; once the name is valid it
+              // generates. Two generate forms would be two places for the same
+              // state to disagree, and silently defaulting the name would be
+              // this panel choosing something it has no business choosing.
+              Row {
+                spacing: root.padCard
+                ActionButton {
+                  glyph: Model.GLYPH.plus
+                  primary: true
+                  label: Model.validIdentityName(root.newIdentityName)
+                    ? "generate \"" + root.newIdentityName + "\""
+                    : "name an identity"
+                  available: !anubis.actionBusy
+                  onActivated: {
+                    if (Model.validIdentityName(root.newIdentityName)) {
+                      anubis.generateIdentity(root.newIdentityName)
+                      return
+                    }
+                    root.focusRequest = "keygen"
+                    leftScroll.contentY = 0
+                    identityNameField.forceActiveFocus()
+                  }
+                }
+                Meta {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: Model.validIdentityName(root.newIdentityName)
+                    ? "or press Enter in the name field"
+                    : "jumps to the name field in the identity vault -- Ctrl+G"
+                  color: Qt.alpha(root.fg, 0.4)
+                }
+              }
+            }
+
+            // ------------------------------------------------ engine absent
+            SectionCard {
+              width: centrePane.width
+              visible: anubis.engineMissing
+              title: Model.GLYPH.alert + "  ENGINE NOT INSTALLED"
+              tint: Qt.alpha(root.fg, 0.05)
+              edge: Qt.alpha(root.fg, 0.25)
+
+              Mono {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "No `anubis` executable was found in ~/.cargo/bin, "
+                  + "~/.local/bin, /usr/local/bin, /usr/bin, or on PATH. "
+                  + "ANUBIS is pure Rust with no system libraries to install, "
+                  + "so one cargo command is the whole dependency story."
+                color: Qt.alpha(root.fg, 0.7)
+              }
+              Rectangle {
+                width: parent.width
+                implicitHeight: hintText.implicitHeight + (root.padCard * 2)
+                radius: Style.cornerRadius
+                color: Qt.alpha(root.fg, 0.06)
+                border.color: Qt.alpha(root.fg, 0.15)
+                border.width: 1
+                Mono {
+                  id: hintText
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.margins: root.padCard
+                  wrapMode: Text.WrapAnywhere
+                  text: Model.installHint()
+                  color: root.fg
+                }
+              }
+              Row {
+                spacing: root.padCard
+                ActionButton {
+                  glyph: Model.GLYPH.copy
+                  label: "copy command"
+                  onActivated: anubis.copyText(Model.installHint(),
+                                               "install command")
+                }
+                ActionButton {
+                  glyph: Model.GLYPH.refresh
+                  label: "re-probe"
+                  primary: true
+                  onActivated: anubis.probeEngine()
+                }
+              }
+            }
+
+            // -------------------------------------------- operation console
+            SectionCard {
+              width: centrePane.width
+              title: Model.GLYPH.lock + "  OPERATION CONSOLE"
+              note: anubis.enginePath
+              // The primary workspace, and the only card that says so. The
+              // rails carry the same information density but at a lower tint
+              // and a smaller type step, so the eye lands here first.
+              emphasis: true
+              tint: Qt.alpha(root.fg, 0.055)
+
+              Rectangle {
+                id: dropZone
+                width: parent.width
+                implicitHeight: dropCol.implicitHeight + (root.padCard * 2)
+                radius: Style.cornerRadius
+                color: fileDrop.containsDrag ? Qt.alpha(root.accent, 0.12)
+                                             : Qt.alpha(root.fg, 0.03)
+                border.color: fileDrop.containsDrag
+                  ? root.accent : Qt.alpha(root.fg, 0.18)
+                border.width: 1
+
+                Column {
+                  id: dropCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: root.padCard
+                  spacing: root.padGroup
+
+                  Legend {
+                    width: dropCol.width
+                    text: (root.targetIsVault ? Model.GLYPH.fileLock
+                                              : Model.GLYPH.file)
+                      + "  TARGET FILE -- drop one here, or type a path"
+                  }
+                  TextField {
+                    id: pathField
+                    width: dropCol.width
+                    placeholderText: "/path/to/file"
+                    font.pixelSize: root.typeBody
+                    verticalPadding: root.padLine
+                    onTextChanged: pathSettle.restart()
+                    onAccepted: root.targetPath =
+                      Model.normalizePath(text, root.home)
+                  }
+                  Item {
+                    width: dropCol.width
+                    height: outLabel.implicitHeight
+                    Meta {
+                      id: outLabel
+                      anchors.left: parent.left
+                      anchors.top: parent.top
+                      text: "output"
+                      color: Qt.alpha(root.fg, 0.4)
+                    }
+                    Mono {
+                      anchors.left: outLabel.right
+                      anchors.leftMargin: root.padCard
+                      anchors.right: parent.right
+                      anchors.baseline: outLabel.baseline
+                      horizontalAlignment: Text.AlignRight
+                      elide: Text.ElideMiddle
+                      text: root.targetPath === "" ? "--"
+                        : Model.outputFor(root.targetIsVault
+                                          ? "decrypt" : "encrypt",
+                                          root.targetPath)
+                      color: root.targetPath === "" ? Qt.alpha(root.fg, 0.4)
+                                                    : Qt.alpha(root.fg, 0.75)
+                    }
+                  }
+                }
+
+                DropArea {
+                  id: fileDrop
+                  anchors.fill: parent
+                  keys: ["text/uri-list"]
+                  onDropped: function (drop) {
+                    if (drop.hasUrls && drop.urls.length > 0)
+                      root.selectPath(String(drop.urls[0]))
+                    else if (drop.hasText) root.selectPath(drop.text)
+                    drop.accept()
+                  }
+                }
+              }
+
+              Item {
+                width: parent.width
+                height: recipientHeader.implicitHeight
+                Legend {
+                  id: recipientHeader
+                  anchors.left: parent.left
+                  anchors.top: parent.top
+                  text: "RECIPIENTS -- " + root.selectedKeys.length + " selected"
+                }
+                Meta {
+                  id: clearSelection
+                  anchors.right: parent.right
+                  anchors.baseline: recipientHeader.baseline
+                  visible: root.selection.length > 0
+                  text: "clear"
+                  color: clearArea.containsMouse
+                    ? root.accent : Qt.alpha(root.fg, 0.35)
+                }
+                MouseArea {
+                  id: clearArea
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.bottom: parent.bottom
+                  width: clearSelection.implicitWidth + root.padGroup
+                  hoverEnabled: true
+                  enabled: clearSelection.visible
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.selection = []
+                }
+              }
+
+              Flow {
+                width: parent.width
+                spacing: root.padGroup
+
+                Repeater {
+                  model: anubis.identities
+                  delegate: Chip {
+                    id: selfChip
+                    required property var modelData
+                    readonly property string chipKey:
+                      String(selfChip.modelData.recipient || "")
+                    label: "self " + String(selfChip.modelData.name) + "  "
+                      + Model.formatFingerprint(selfChip.modelData.fingerprint)
+                    tone: Model.isMember(root.selection, selfChip.chipKey)
+                      ? root.accent : Qt.alpha(root.fg, 0.6)
+                    solid: Model.isMember(root.selection, selfChip.chipKey)
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleRecipient(selfChip.chipKey)
+                    }
+                  }
+                }
+                Repeater {
+                  model: anubis.recipients
+                  delegate: Chip {
+                    id: bookChip
+                    required property var modelData
+                    readonly property string chipKey:
+                      String(bookChip.modelData.key || "")
+                    label: String(bookChip.modelData.label) + "  "
+                      + Model.formatFingerprint(bookChip.modelData.fingerprint)
+                    tone: Model.isMember(root.selection, bookChip.chipKey)
+                      ? root.accent : Qt.alpha(root.fg, 0.6)
+                    solid: Model.isMember(root.selection, bookChip.chipKey)
+                    MouseArea {
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleRecipient(bookChip.chipKey)
+                    }
+                  }
+                }
+              }
+
+              // The first-run card already says this at length, so when it is
+              // on screen this line would be the third copy of the same
+              // sentence. It exists for the case where the book has entries
+              // but nothing is picked.
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                visible: anubis.identities.length === 0
+                  && anubis.recipients.length === 0 && !anubis.engineMissing
+                  && !firstRun.visible
+                text: "Nothing to encrypt to yet. Generate an identity or add "
+                  + "a recipient in the left rail."
+                color: Qt.alpha(root.fg, 0.45)
+              }
+
+              Item {
+                width: parent.width
+                height: Math.max(signToggle.height, identityNote.implicitHeight)
+
+                Rectangle {
+                  id: signToggle
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  readonly property bool on: root.signRequested && anubis.canSign
+                  width: signRow.implicitWidth + (root.padCard * 2)
+                  height: signRow.implicitHeight + (root.padGroup * 2)
+                  radius: Style.cornerRadius
+                  opacity: anubis.canSign ? 1.0 : 0.4
+                  color: signToggle.on ? Qt.alpha(root.accent, 0.18)
+                                       : Qt.alpha(root.fg, 0.05)
+                  border.color: signToggle.on ? root.accent
+                                              : Qt.alpha(root.fg, 0.2)
+                  border.width: 1
+
+                  Row {
+                    id: signRow
+                    anchors.centerIn: parent
+                    spacing: root.padGroup
+                    Rectangle {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: root.padCard
+                      height: width
+                      radius: Style.cornerRadius
+                      color: signToggle.on ? Qt.alpha(root.accent, 0.4)
+                                           : "transparent"
+                      border.color: signToggle.on ? root.accent
+                                                  : Qt.alpha(root.fg, 0.35)
+                      border.width: 1
+                      Mono {
+                        anchors.centerIn: parent
+                        visible: signToggle.on
+                        text: Model.GLYPH.check
+                        color: root.accent
+                      }
+                    }
+                    Mono {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: Model.GLYPH.signature + "  sign with ML-DSA-87"
+                      color: signToggle.on ? root.accent
+                                           : Qt.alpha(root.fg, 0.7)
+                    }
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    enabled: anubis.canSign
+                    cursorShape: anubis.canSign ? Qt.PointingHandCursor
+                                                : Qt.ArrowCursor
+                    onClicked: root.signRequested = !root.signRequested
+                  }
+                }
+
+                Meta {
+                  id: identityNote
+                  anchors.left: signToggle.right
+                  anchors.leftMargin: root.padCard
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  horizontalAlignment: Text.AlignRight
+                  elide: Text.ElideRight
+                  text: root.effectiveIdentity === ""
+                    ? "no identity available"
+                    : "identity " + root.effectiveIdentity
+                      + (root.chosenIdentity === "" ? " (default)" : "")
+                  color: root.effectiveIdentity === ""
+                    ? Qt.alpha(root.fg, 0.45) : Qt.alpha(root.fg, 0.5)
+                }
+              }
+
+              // Confirmation surface: fingerprints, never truncated keys.
+              Column {
+                width: parent.width
+                spacing: root.padLine
+                visible: root.selectedKeys.length > 0
+                Legend {
+                  width: parent.width
+                  text: "WILL BE READABLE BY"
+                }
+                Repeater {
+                  model: Model.selectionHandles(anubis.status, root.selection)
+                  delegate: Mono {
+                    required property var modelData
+                    width: parent.width
+                    elide: Text.ElideRight
+                    text: Model.GLYPH.fingerprint + "  " + modelData
+                    color: Qt.alpha(root.accent, 0.85)
+                  }
+                }
+              }
+
+              Row {
+                spacing: root.padCard
+
+                ActionButton {
+                  glyph: Model.GLYPH.lock
+                  label: "Encrypt"
+                  primary: root.focusRequest !== "decrypt"
+                  available: !anubis.engineMissing && !anubis.opBusy
+                    && root.targetPath !== "" && root.selectedKeys.length > 0
+                  onActivated: root.runEncrypt()
+                }
+                ActionButton {
+                  glyph: Model.GLYPH.lockOpen
+                  label: "Decrypt"
+                  primary: root.focusRequest === "decrypt"
+                  available: !anubis.engineMissing && !anubis.opBusy
+                    && root.targetPath !== ""
+                  onActivated: root.runDecrypt()
+                }
+                ActionButton {
+                  glyph: Model.GLYPH.eye
+                  label: "Inspect"
+                  available: !anubis.engineMissing && root.targetPath !== ""
+                    && !anubis.inspectBusy
+                  onActivated: anubis.runInspect(root.targetPath)
+                }
+                ActionButton {
+                  visible: anubis.opBusy
+                  glyph: Model.GLYPH.close
+                  label: "Abort"
+                  tone: root.urgent
+                  onActivated: anubis.abortOperation()
+                }
+              }
+
+              // Overwrite gate. Destroying an existing file is the one thing
+              // this panel will not do without a second, explicit click.
+              Rectangle {
+                width: parent.width
+                visible: anubis.pendingOverwrite !== null
+                implicitHeight: overwriteCol.implicitHeight + (root.padCard * 2)
+                radius: Style.cornerRadius
+                color: Qt.alpha(root.urgent, 0.08)
+                border.color: Qt.alpha(root.urgent, 0.45)
+                border.width: 1
+
+                Column {
+                  id: overwriteCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: root.padCard
+                  spacing: root.padGroup
+
+                  Mono {
+                    width: overwriteCol.width
+                    wrapMode: Text.WrapAnywhere
+                    text: Model.GLYPH.alert + "  The output already exists: "
+                      + (anubis.pendingOverwrite
+                         ? String(anubis.pendingOverwrite.output) : "")
+                    color: root.urgent
+                    font.bold: true
+                  }
+                  Row {
+                    spacing: root.padCard
+                    ActionButton {
+                      label: "overwrite it"
+                      tone: root.urgent
+                      onActivated: anubis.confirmPending()
+                    }
+                    ActionButton {
+                      label: "cancel"
+                      onActivated: anubis.cancelPending()
+                    }
+                  }
+                }
+              }
+
+              // The whole block appears at once when an operation starts, so it
+              // fades rather than snapping into the middle of the console. The
+              // fade is on opacity only -- the layout takes its space
+              // immediately, so nothing below it slides while a bar animates.
+              Column {
+                id: progressBlock
+                width: parent.width
+                spacing: root.padGroup
+                readonly property bool active: anubis.opBusy
+                  || anubis.opResult !== null || anubis.opError !== ""
+                visible: progressBlock.active
+                opacity: progressBlock.active ? 1.0 : 0.0
+                Behavior on opacity {
+                  enabled: root.motion
+                  NumberAnimation {
+                    duration: root.motionBase
+                    easing.type: Easing.OutQuart
+                  }
+                }
+
+                Item {
+                  width: parent.width
+                  height: progressText.implicitHeight
+                  Mono {
+                    id: progressText
+                    anchors.left: parent.left
+                    text: anubis.opBusy
+                      ? (anubis.opIndeterminate
+                         ? anubis.opKind + "  |  working"
+                         : Model.progressLabel(anubis.opKind, anubis.opDone,
+                                               anubis.opTotal,
+                                               anubis.opElapsedMs))
+                      : (anubis.opResult
+                         ? (anubis.opResult.ok === true ? "completed" : "failed")
+                         : "")
+                    color: anubis.opBusy ? root.accent
+                      : (anubis.opResult && anubis.opResult.ok === true
+                         ? root.accent : root.urgent)
+                    font.bold: true
+                  }
+                  Meta {
+                    anchors.right: parent.right
+                    anchors.baseline: progressText.baseline
+                    text: anubis.opBusy
+                      ? Model.formatMillis(anubis.opElapsedMs)
+                      : (anubis.opResult ? Model.opSummary(anubis.opResult) : "")
+                    color: Qt.alpha(root.fg, 0.5)
+                  }
+                }
+
+                // Progress events are throttled to roughly one per 4 MiB, so
+                // a small file produces none at all. Until a total is known
+                // the bar sweeps instead of sitting dead at zero, and it is
+                // labelled "working", not "0%": claiming a percentage the
+                // engine never reported would be a small lie.
+                Rectangle {
+                  id: progressTrack
+                  width: parent.width
+                  height: root.padGroup
+                  radius: height / 2
+                  color: Qt.alpha(root.fg, 0.08)
+                  clip: true
+
+                  Rectangle {
+                    visible: !anubis.opIndeterminate
+                    height: parent.height
+                    radius: parent.radius
+                    width: parent.width * Math.max(0, Math.min(1,
+                      (anubis.opBusy ? anubis.opPct
+                       : (anubis.opResult && anubis.opResult.ok === true
+                          ? 100 : 0)) / 100))
+                    color: anubis.opError !== "" ? root.urgent : root.accent
+                    Behavior on width {
+                      enabled: root.motion
+                      NumberAnimation {
+                        duration: root.motionBase
+                        easing.type: Easing.OutQuart
+                      }
+                    }
+                  }
+
+                  Rectangle {
+                    id: sweep
+                    visible: anubis.opIndeterminate
+                    height: parent.height
+                    radius: parent.radius
+                    width: parent.width * 0.28
+                    color: Qt.alpha(root.accent, 0.75)
+                    x: -width
+                    NumberAnimation on x {
+                      running: sweep.visible && root.motion
+                      loops: Animation.Infinite
+                      from: -sweep.width
+                      to: progressTrack.width
+                      duration: 900
+                    }
+                  }
+                }
+
+                Mono {
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  visible: anubis.opError !== ""
+                  text: Model.noticeGlyph(anubis.opError) + "  " + anubis.opError
+                  color: root.toneColor(Model.noticeTone(anubis.opError))
+                }
+                Mono {
+                  width: parent.width
+                  elide: Text.ElideMiddle
+                  visible: anubis.opResult !== null
+                    && anubis.opResult.ok === true
+                  text: Model.GLYPH.check + "  wrote "
+                    + (anubis.opResult ? String(anubis.opResult.out || "") : "")
+                  color: Qt.alpha(root.accent, 0.85)
+                }
+              }
+            }
+
+            // ------------------------------------------------- inspector
+            SectionCard {
+              id: inspector
+              width: centrePane.width
+              // The MAC answer can come from two places: the inspect payload
+              // (always null -- it holds no key) or a decrypt of this exact
+              // container that already had to check it. The second is a fact
+              // about a check that ran, so it is allowed to promote the chip.
+              readonly property string attestedAt:
+                anubis.macAttestedAt(anubis.inspectPath)
+              readonly property string macTone:
+                Model.macToneAttested(anubis.inspectResult, inspector.attestedAt)
+              readonly property bool tampered:
+                anubis.inspectResult !== null && inspector.macTone === "bad"
+              // Accent means verified. The card only earns it when something
+              // actually verified; a header nobody could check leaves the card
+              // neutral rather than borrowing a pass.
+              readonly property bool attested:
+                anubis.inspectResult !== null && inspector.macTone === "good"
+
+              title: Model.GLYPH.eye + "  CONTAINER INSPECTOR"
+              note: anubis.inspectPath === "" ? "nothing selected"
+                : Model.basename(anubis.inspectPath)
+              tint: inspector.tampered ? Qt.alpha(root.urgent, 0.07)
+                : (inspector.attested ? Qt.alpha(root.accent, 0.045)
+                                      : Qt.alpha(root.fg, 0.035))
+              edge: inspector.tampered ? Qt.alpha(root.urgent, 0.5)
+                : (inspector.attested ? Qt.alpha(root.accent, 0.28)
+                                      : Qt.alpha(root.fg, 0.09))
+              // Idle, this card used to be a two-line strip with four hundred
+              // pixels of nothing under it, which read as an unfinished layout
+              // rather than as a console waiting for input. Given a floor it
+              // becomes a well: the same waiting state, deliberately shaped.
+              // The floor drops away the moment there is a header to show, so
+              // it never pads a populated inspector.
+              minHeight: anubis.inspectPath === "" && anubis.inspectError === ""
+                && !firstRun.visible ? Style.spacing.searchablePopupMinHeight
+                                     : 0
+
+              Item {
+                width: parent.width
+                visible: anubis.inspectPath === "" && anubis.inspectError === ""
+                implicitHeight: idleCol.implicitHeight
+                Column {
+                  id: idleCol
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  anchors.top: parent.top
+                  anchors.topMargin: root.padRail
+                  width: Math.min(parent.width, Style.spacing.dropdownWidth * 2)
+                  spacing: root.padGroup
+
+                  Mono {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: Model.GLYPH.fileLock
+                    font.pixelSize: Style.font.display
+                    color: Qt.alpha(root.fg, 0.14)
+                  }
+                  Mono {
+                    width: idleCol.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: "Pick a .anubis container above and its header is "
+                      + "parsed here."
+                    color: Qt.alpha(root.fg, 0.5)
+                  }
+                  Meta {
+                    width: idleCol.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: "Reading a header decrypts nothing. An audit row on "
+                      + "the right is also clickable -- it loads the file it "
+                      + "wrote."
+                    color: Qt.alpha(root.fg, 0.35)
+                  }
+                }
+              }
+
+              Mono {
+                width: parent.width
+                visible: anubis.inspectBusy
+                text: "reading header..."
+                color: Qt.alpha(root.fg, 0.55)
+              }
+
+              // Two different things wear two different faces. A legacy
+              // container is an upgrade path; anything else that stops the
+              // header being read is a genuine problem.
+              Rectangle {
+                width: parent.width
+                visible: anubis.inspectError !== "" && !anubis.inspectBusy
+                implicitHeight: noticeCol.implicitHeight + (root.padCard * 2)
+                radius: Style.cornerRadius
+                readonly property string tone:
+                  Model.noticeTone(anubis.inspectError)
+                color: tone === "notice" ? Qt.alpha(root.fg, 0.06)
+                                         : Qt.alpha(root.urgent, 0.10)
+                border.color: tone === "notice" ? Qt.alpha(root.fg, 0.22)
+                                                : Qt.alpha(root.urgent, 0.5)
+                border.width: 1
+
+                Column {
+                  id: noticeCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: root.padCard
+                  spacing: root.padLine
+
+                  Mono {
+                    width: noticeCol.width
+                    wrapMode: Text.WordWrap
+                    text: Model.noticeGlyph(anubis.inspectError) + "  "
+                      + Model.noticeHeading(anubis.inspectError)
+                    color: root.toneColor(Model.noticeTone(anubis.inspectError))
+                    font.bold: true
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Mono {
+                    width: noticeCol.width
+                    wrapMode: Text.WordWrap
+                    text: anubis.inspectError
+                    color: Qt.alpha(root.fg, 0.75)
+                  }
+                  Mono {
+                    width: noticeCol.width
+                    wrapMode: Text.WordWrap
+                    visible: text !== ""
+                    text: Model.noticeAdvice(anubis.inspectError)
+                    color: Qt.alpha(root.fg, 0.5)
+                  }
+                }
+              }
+
+              // The two verdicts. They answer different questions and are
+              // allowed to disagree, so they are never merged into one badge.
+              Row {
+                width: parent.width
+                spacing: root.padCard
+                visible: anubis.inspectResult !== null
+
+                Rectangle {
+                  id: macPanel
+                  width: (parent.width - root.padCard) / 2
+                  implicitHeight: macCol.implicitHeight + (root.padCard * 2)
+                  height: implicitHeight
+                  radius: Style.cornerRadius
+                  color: Qt.alpha(root.toneColor(inspector.macTone), 0.12)
+                  border.color: Qt.alpha(root.toneColor(inspector.macTone), 0.6)
+                  border.width: inspector.macTone === "bad" ? 2 : 1
+
+                  Column {
+                    id: macCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: root.padCard
+                    spacing: root.padLine
+                    Mono {
+                      width: macCol.width
+                      wrapMode: Text.WordWrap
+                      text: (inspector.macTone === "good"
+                             ? Model.GLYPH.shieldCheck
+                             : (inspector.macTone === "bad"
+                                ? Model.GLYPH.shieldAlert : Model.GLYPH.shield))
+                        + "  " + Model.macLabelAttested(anubis.inspectResult,
+                                                        inspector.attestedAt)
+                      color: root.toneColor(inspector.macTone)
+                      font.bold: true
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Mono {
+                      width: macCol.width
+                      wrapMode: Text.WordWrap
+                      text: Model.macExplanationAttested(anubis.inspectResult,
+                                                         inspector.attestedAt)
+                      color: Qt.alpha(root.fg, 0.45)
+                    }
+                  }
+                }
+
+                Rectangle {
+                  id: sigPanel
+                  readonly property string sigTone:
+                    Model.signatureTone(anubis.inspectResult)
+                  readonly property string paintTone:
+                    sigPanel.sigTone === "none" ? "neutral" : sigPanel.sigTone
+                  readonly property string signerFp:
+                    Model.signerFingerprint(anubis.inspectResult)
+                  // Compared ONLY against each identity's signing_fingerprint.
+                  // A recipient fingerprint is a different hash of a different
+                  // key and comparing the two would manufacture a falsehood.
+                  readonly property var signer:
+                    Model.signedByIdentity(anubis.status, anubis.inspectResult)
+                  width: (parent.width - root.padCard) / 2
+                  implicitHeight: sigCol.implicitHeight + (root.padCard * 2)
+                  height: implicitHeight
+                  radius: Style.cornerRadius
+                  color: Qt.alpha(root.toneColor(sigPanel.paintTone), 0.10)
+                  border.color: Qt.alpha(root.toneColor(sigPanel.paintTone), 0.5)
+                  border.width: 1
+
+                  Column {
+                    id: sigCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: root.padCard
+                    spacing: root.padLine
+                    Mono {
+                      width: sigCol.width
+                      wrapMode: Text.WordWrap
+                      text: (sigPanel.sigTone === "good"
+                             ? Model.GLYPH.signature : Model.GLYPH.shield)
+                        + "  " + Model.signatureLabel(anubis.inspectResult)
+                      color: root.toneColor(sigPanel.paintTone)
+                      font.bold: true
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Mono {
+                      width: sigCol.width
+                      wrapMode: Text.WordWrap
+                      text: sigPanel.signer
+                        ? "signed by your identity \""
+                          + sigPanel.signer.name + "\""
+                        : (sigPanel.sigTone === "good"
+                           ? "signer is not an identity in this vault -- "
+                             + "check the fingerprint out of band before "
+                             + "trusting it"
+                           : "no signature to attribute")
+                      color: sigPanel.signer ? Qt.alpha(root.accent, 0.85)
+                                             : Qt.alpha(root.fg, 0.5)
+                    }
+                    Mono {
+                      width: sigCol.width
+                      wrapMode: Text.WordWrap
+                      text: "A signature says who wrote the file. The header "
+                        + "MAC does not."
+                      color: Qt.alpha(root.fg, 0.32)
+                    }
+                  }
+                }
+              }
+
+              // The engine reports the signer as a fingerprint already
+              // (signer_fingerprint), so there is no raw key to offer. It is
+              // labelled "signer" so it can never be mistaken for the
+              // recipient fingerprints shown in the rails.
+              FingerprintRow {
+                width: parent.width
+                visible: Model.signerFingerprint(anubis.inspectResult) !== ""
+                kind: "signer"
+                fingerprint: Model.signerFingerprint(anubis.inspectResult)
+                fullKey: ""
+              }
+
+              // Format string comes straight from the engine's JSON, never
+              // from a constant here: the wire format versions on its own
+              // schedule and this panel must not drift from it.
+              Repeater {
+                model: anubis.inspectResult
+                  ? Model.inspectFacts(anubis.inspectResult) : []
+                delegate: FieldRow {
+                  required property var modelData
+                  width: parent.width
+                  label: modelData.label
+                  value: modelData.value
+                  tone: modelData.tone
+                }
+              }
+
+              Mono {
+                width: parent.width
+                visible: anubis.inspectResult !== null && text !== ""
+                text: Model.chunkNote(anubis.inspectResult)
+                color: Qt.alpha(root.fg, 0.35)
+              }
+
+              Mono {
+                width: parent.width
+                visible: Model.stanzaRows(anubis.inspectResult).length > 0
+                text: "STANZAS"
+                color: Qt.alpha(root.fg, 0.45)
+                font.bold: true
+              }
+              Repeater {
+                model: Model.stanzaRows(anubis.inspectResult)
+                delegate: Item {
+                  id: stanzaRow
+                  required property var modelData
+                  width: parent.width
+                  implicitHeight: stanzaType.implicitHeight + root.padLine
+                  Mono {
+                    id: stanzaType
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.GLYPH.atom + "  "
+                      + String(stanzaRow.modelData.type)
+                    color: Qt.alpha(root.fg, 0.75)
+                  }
+                  Mono {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: String(stanzaRow.modelData.recipients)
+                      + (Number(stanzaRow.modelData.recipients) === 1
+                         ? " recipient" : " recipients")
+                    color: root.accent
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // ======================================================= RIGHT RAIL
+        Flickable {
+          id: rightScroll
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
+          anchors.right: parent.right
+          width: body.cols.right
+          contentWidth: width
+          contentHeight: rightPane.implicitHeight
+          clip: true
+          pixelAligned: true
+          boundsBehavior: Flickable.StopAtBounds
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+          Column {
+            id: rightPane
+            width: rightScroll.width - root.padGroup
+            spacing: body.gap
+
+            // ------------------------------------------------------ ledger
+            SectionCard {
+              width: rightPane.width
+              recessed: true
+              title: Model.GLYPH.pulse + "  LEDGER"
+              note: anubis.status
+                ? Model.timeAgo(anubis.status.generated, root.nowMs) : ""
+
+              // Label left, count right, on the rail's full width -- not a
+              // two-column grid whose second column floated in the middle of
+              // the card with the numbers unaligned against everything else.
+              Repeater {
+                model: [
+                  { label: "encrypted", value: String(anubis.counts.encrypt),
+                    tone: "neutral" },
+                  { label: "decrypted", value: String(anubis.counts.decrypt),
+                    tone: "neutral" },
+                  { label: "failed", value: String(anubis.counts.failed),
+                    tone: anubis.counts.failed > 0 ? "bad" : "unknown" },
+                  { label: "identities",
+                    value: String(anubis.identities.length), tone: "good" },
+                  { label: "recipients",
+                    value: String(anubis.recipients.length), tone: "good" }
+                ]
+                delegate: FieldRow {
+                  required property var modelData
+                  width: parent.width
+                  label: modelData.label
+                  value: modelData.value
+                  tone: modelData.tone
+                  strong: true
+                }
+              }
+
+              Legend {
+                width: parent.width
+                topPadding: root.padLine
+                text: "ACTIVITY"
+              }
+
+              Canvas {
+                id: activityStrip
+                width: parent.width
+                height: Style.spacing.controlHeight + root.padCard
+
+                onPaint: {
+                  var ctx = getContext("2d")
+                  ctx.reset()
+                  ctx.clearRect(0, 0, width, height)
+
+                  var slots = 40
+                  var series = Model.activitySeries(anubis.status, slots)
+                  var bw = width / slots
+
+                  // Baseline: an empty ledger reads as a ledger, not as a
+                  // rendering failure.
+                  ctx.fillStyle = Qt.alpha(root.fg, 0.10)
+                  ctx.fillRect(0, height - 1, width, 1)
+                  if (series.length === 0) return
+
+                  var maxV = Model.activityMax(series)
+                  var offset = slots - series.length
+                  for (var i = 0; i < series.length; i++) {
+                    var v = series[i].bytes
+                    var h = v > 0
+                      ? Math.max(2, (Math.log(1 + v) / Math.log(1 + maxV))
+                                 * (height - 4))
+                      : 2
+                    ctx.fillStyle = series[i].ok
+                      ? Qt.alpha(root.accent, 0.85) : root.urgent
+                    ctx.fillRect((offset + i) * bw, height - h,
+                                 Math.max(1, bw - 1.5), h)
+                  }
+                }
+
+                Connections {
+                  target: anubis
+                  function onStatusChanged() { activityStrip.requestPaint() }
+                }
+              }
+
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: Model.activitySummary(anubis.status, 40)
+                color: Qt.alpha(root.fg, 0.42)
+              }
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "One bar per operation, log scale, bytes. A failed one "
+                  + "is drawn in the urgent colour at minimum height, so it is "
+                  + "never an empty gap."
+                color: Qt.alpha(root.fg, 0.28)
+              }
+            }
+
+            // ---------------------------------------------- audit timeline
+            SectionCard {
+              width: rightPane.width
+              recessed: true
+              title: Model.GLYPH.history + "  AUDIT TIMELINE"
+              note: anubis.recentOps.length + " rows"
+
+              EmptyWell {
+                visible: anubis.recentOps.length === 0
+                glyph: Model.GLYPH.history
+                headline: anubis.engineMissing ? "no engine" : "nothing yet"
+                body: anubis.engineMissing
+                  ? "The audit log is a file the engine appends to. Without "
+                    + "the engine there is nothing to read."
+                  : "Every encrypt, decrypt and keygen lands here with its "
+                    + "size, duration and verdict."
+                nextStep: anubis.engineMissing ? "" : "the first operation "
+                  + "you run writes the first row"
+                nextStepGlyph: Model.GLYPH.timer
+                actionable: false
+              }
+
+              // Provenance, stated once and quietly. The append-only log is
+              // the engine's, not this panel's; SIA reads the same file.
+              Meta {
+                width: parent.width
+                wrapMode: Text.Wrap
+                visible: !anubis.engineMissing
+                text: "Appended by the engine to "
+                  + anubis.stateDir + "/audit.jsonl, and ingested by SIA as "
+                  + "the anubis organ."
+                color: Qt.alpha(root.fg, 0.28)
+              }
+
+              Repeater {
+                model: anubis.recentOps
+                delegate: Rectangle {
+                  id: auditRow
+                  required property var modelData
+                  readonly property bool ok: auditRow.modelData.ok !== false
+                  readonly property string errorTone:
+                    Model.noticeTone(auditRow.modelData.error)
+                  width: parent.width
+                  implicitHeight: auditCol.implicitHeight + (root.padCard * 2)
+                  radius: Style.cornerRadius
+                  color: auditArea.containsMouse
+                    ? Qt.alpha(root.fg, 0.06) : "transparent"
+                  border.color: auditRow.ok ? Qt.alpha(root.fg, 0.08)
+                    : (auditRow.errorTone === "notice"
+                       ? Qt.alpha(root.fg, 0.22)
+                       : Qt.alpha(root.urgent, 0.35))
+                  border.width: 1
+
+                  Column {
+                    id: auditCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: root.padCard
+                    spacing: root.padTight
+
+                    Item {
+                      width: auditCol.width
+                      height: auditName.implicitHeight
+                      Mono {
+                        id: auditGlyph
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: Model.opGlyph(String(auditRow.modelData.op))
+                        font.pixelSize: root.typeMeta
+                        color: auditRow.ok ? root.accent
+                          : root.toneColor(auditRow.errorTone)
+                      }
+                      Mono {
+                        id: auditName
+                        anchors.left: auditGlyph.right
+                        anchors.leftMargin: root.padGroup
+                        anchors.right: auditVerdict.left
+                        anchors.rightMargin: root.padGroup
+                        anchors.verticalCenter: parent.verticalCenter
+                        elide: Text.ElideMiddle
+                        text: Model.basename(
+                          String(auditRow.modelData.path || ""))
+                        color: root.fg
+                        font.pixelSize: root.typeBody
+                      }
+                      Meta {
+                        id: auditVerdict
+                        anchors.right: parent.right
+                        anchors.baseline: auditName.baseline
+                        text: auditRow.ok ? "ok"
+                          : (auditRow.errorTone === "notice"
+                             ? "unsupported" : "FAILED")
+                        color: auditRow.ok ? Qt.alpha(root.accent, 0.8)
+                          : root.toneColor(auditRow.errorTone)
+                        font.bold: !auditRow.ok
+                          && auditRow.errorTone !== "notice"
+                      }
+                    }
+
+                    // Two facts, two ends of the row. Concatenated with a pipe
+                    // these overran the rail and the relative time -- the part
+                    // a reader actually scans -- was what got elided.
+                    Item {
+                      width: auditCol.width
+                      height: auditStamp.implicitHeight
+                      Meta {
+                        id: auditStamp
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        text: Model.stampLocal(auditRow.modelData.ts)
+                        color: Qt.alpha(root.fg, 0.42)
+                      }
+                      Meta {
+                        anchors.right: parent.right
+                        anchors.baseline: auditStamp.baseline
+                        text: Model.timeAgo(auditRow.modelData.ts, root.nowMs)
+                        color: Qt.alpha(root.fg, 0.42)
+                      }
+                    }
+                    // Wraps rather than elides. A throughput cut to "517..."
+                    // is a number the reader cannot use; a second line is.
+                    Meta {
+                      width: auditCol.width
+                      wrapMode: Text.WordWrap
+                      visible: text !== ""
+                      text: Model.opSummary(auditRow.modelData)
+                      color: Qt.alpha(root.fg, 0.42)
+                    }
+                    Meta {
+                      width: auditCol.width
+                      elide: Text.ElideMiddle
+                      visible: text !== ""
+                      text: String(auditRow.modelData.out || "")
+                      color: Qt.alpha(root.fg, 0.28)
+                    }
+                    Mono {
+                      width: auditCol.width
+                      wrapMode: Text.WordWrap
+                      visible: !auditRow.ok && text !== ""
+                      text: String(auditRow.modelData.error || "")
+                      color: auditRow.errorTone === "notice"
+                        ? Qt.alpha(root.fg, 0.6) : Qt.alpha(root.urgent, 0.9)
+                    }
+                  }
+
+                  MouseArea {
+                    id: auditArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                      var target = String(auditRow.modelData.out || "")
+                      if (target === "" || !Model.isVaultFile(target))
+                        target = String(auditRow.modelData.path || "")
+                      if (target !== "") root.selectPath(target)
+                    }
+                  }
+                }
+              }
+            }
+
+            // ------------------------------------------------- boundaries
+            SectionCard {
+              width: rightPane.width
+              recessed: true
+              title: Model.GLYPH.seal + "  WHAT THIS PANEL IS"
+
+              // Reference prose, so it sits at metadata weight. Every claim
+              // here is load-bearing and none of it changes, which is exactly
+              // what should recede once it has been read once.
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "It spawns the anubis binary, reads its JSON, and draws "
+                  + "it. It holds no key material, derives no secret, and "
+                  + "reaches no verification verdict of its own."
+                color: Qt.alpha(root.fg, 0.48)
+              }
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "A field the engine did not state is rendered as NOT "
+                  + "STATED, never as a pass. A failed poll clears the status "
+                  + "rather than leaving the last good one on screen."
+                color: Qt.alpha(root.fg, 0.48)
+              }
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "The urgent colour means authentication failed. An "
+                  + "unsupported legacy container is drawn as a plain notice, "
+                  + "because an old file is not a tampered file."
+                color: Qt.alpha(root.fg, 0.48)
+              }
+              Meta {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "Fingerprints are 80 bits of SHA-256 over the recipient "
+                  + "payload. They are the handle because a 2573-character "
+                  + "bech32 string is past the length where its checksum "
+                  + "still guarantees error detection."
+                color: Qt.alpha(root.fg, 0.48)
+              }
+              FieldRow {
+                width: parent.width
+                label: "AEAD"
+                value: String(anubis.suite.aead || "--")
+              }
+              FieldRow {
+                width: parent.width
+                label: "KDF"
+                value: String(anubis.suite.kdf || "--")
+              }
+              FieldRow {
+                width: parent.width
+                label: "wire format"
+                value: Model.wireFormat(anubis.suite) === ""
+                  ? "--" : Model.wireFormat(anubis.suite)
+              }
+              FieldRow {
+                width: parent.width
+                label: "dependencies"
+                value: anubis.suite.pure_rust === true
+                  ? "pure Rust" : "native libraries"
+              }
+              FieldRow {
+                width: parent.width
+                label: "engine"
+                value: anubis.enginePath === "" ? "not found" : anubis.enginePath
+                tone: anubis.enginePath === "" ? "unknown" : "neutral"
+              }
+              FieldRow {
+                width: parent.width
+                label: "config"
+                value: anubis.configDir
+              }
+              FieldRow {
+                width: parent.width
+                label: "state"
+                value: anubis.stateDir
+              }
+              FieldRow {
+                width: parent.width
+                label: "poll"
+                value: "every " + root.opts.pollIntervalSec + "s"
+              }
+              FieldRow {
+                width: parent.width
+                label: "overwrite"
+                value: root.opts.confirmOverwrite ? "confirm first"
+                                                  : "no confirmation"
+                tone: root.opts.confirmOverwrite ? "neutral" : "unknown"
+              }
+              Mono {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                visible: anubis.statusError !== ""
+                text: Model.GLYPH.alert + "  " + anubis.statusError
+                color: root.urgent
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

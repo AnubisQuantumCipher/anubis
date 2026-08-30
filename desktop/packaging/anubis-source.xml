@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <!-- Anubis LANGUAGE source. A separate project that shares the name and one
+       of the extensions; without this, every .anubis program on the machine is
+       typed as an encrypted container and double-clicking one opens the
+       decryptor. Default glob weight, so it wins .anubis whenever the
+       container magic does not match. -->
+  <mime-type type="text/x-anubis">
+    <comment>Anubis source code</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.anb"/>
+    <glob pattern="*.anub"/>
+    <glob pattern="*.anubis"/>
+  </mime-type>
+</mime-info>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.anubis.container">
+    <comment>ANUBIS encrypted container</comment>
+    <comment xml:lang="en">ANUBIS encrypted container</comment>
+
+    <!-- Content decides, not the name.
+         `.anubis` is ALSO a source extension for the Anubis language, so the
+         glob alone cannot tell a sealed file from a program. It is therefore
+         weighted below the default 50 that the source type uses, and the magic
+         rule below is what actually promotes a real container. A file that
+         merely ends in .anubis is not promoted on that basis alone. -->
+    <glob pattern="*.anubis" weight="40"/>
+
+    <!-- Two headers, either of which is decisive. The first is the wire
+         format's own first line. The second is the ASCII armored form, which
+         the previous rule never matched, so an armored container was
+         recognised only when it happened to be named correctly. -->
+    <magic priority="80">
+      <match type="string" value="anubis-encryption.org/v3" offset="0"/>
+      <match type="string" value="-----BEGIN ANUBIS ENCRYPTED FILE-----" offset="0"/>
+    </magic>
+
+    <icon name="application-vnd.anubis.container"/>
+  </mime-type>
+</mime-info>

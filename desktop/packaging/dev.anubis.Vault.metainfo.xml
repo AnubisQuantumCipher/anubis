@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.anubis.Vault</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <developer id="dev.anubis">
+    <name>Anubis Quantum Cipher</name>
+  </developer>
+
+  <url type="homepage">https://github.com/AnubisQuantumCipher/anubis</url>
+
+  <name>ANUBIS Vault</name>
+  <summary>Post-quantum file encryption</summary>
+
+  <description>
+    <p>
+      A desktop front end for the ANUBIS file encryption engine: hybrid
+      X25519 and ML-KEM-1024 key encapsulation, ML-DSA-87 signatures, and
+      ChaCha20-Poly1305 STREAM payloads.
+    </p>
+    <p>
+      The application drives the anubis engine, reads its JSON, and draws it.
+      It holds no key material, derives no secret, performs no cryptography,
+      and reaches no verification verdict of its own. A field the engine did
+      not state is rendered as not stated, never as a pass.
+    </p>
+    <p>
+      Identities and recipients are handled by fingerprint rather than by key,
+      because an ANUBIS recipient runs to roughly 2573 bech32 characters and
+      no person compares that.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">dev.anubis.Vault.desktop</launchable>
+
+  <provides>
+    <binary>anubis-desktop</binary>
+    <mediatype>application/vnd.anubis.container</mediatype>
+  </provides>
+
+  <categories>
+    <category>Utility</category>
+    <category>Security</category>
+  </categories>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="2.0.0" date="2026-08-30">
+      <description>
+        <p>First standalone release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,97 @@
+// ANUBIS bar widget -- vault state at a glance.
+//
+// A shield-key glyph, the number of identities the engine reports, and one
+// state dot: accent when the engine answered and its last operation stood,
+// urgent when that operation failed or status could not be read, dimmed when
+// no `anubis` executable exists on this machine yet. The widget performs no
+// cryptography and asserts nothing the engine did not say; "unknown" is
+// rendered as unknown rather than promoted to a pass.
+//
+// Click summons the full-screen vault. Right-click re-probes.
+
+import QtQuick
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+
+BarWidget {
+  id: root
+  moduleName: "khephri.anubis"
+
+  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color urgentColor: bar ? bar.urgent : Color.urgent
+  // Same switch the vault reads, so turning motion off quiets both surfaces
+  // rather than only the one the user happened to be looking at.
+  readonly property bool motionEnabled: Model.resolveSettings(root.settings)
+    .motionEnabled
+
+  readonly property string vaultState:
+    Model.panelState(anubis.engineMissing, anubis.status, anubis.statusError)
+  readonly property int identityCount: anubis.identities.length
+
+  function stateColor() {
+    if (vaultState === "absent") return Qt.alpha(fg, 0.35)
+    if (vaultState === "failed" || vaultState === "error") return urgentColor
+    if (vaultState === "unknown") return Qt.alpha(fg, 0.6)
+    return Color.accent
+  }
+
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  Service {
+    id: anubis
+    settings: root.settings
+  }
+
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: Model.panelGlyph(root.vaultState)
+      + (root.vaultState === "absent" || root.identityCount === 0
+         ? "" : " " + root.identityCount)
+    slotSize: Style.bar.statusSlot
+    // The stock slot is one glyph wide; grow with the painted count so the
+    // neighbouring widget cannot paint over the number.
+    fixedWidth: vertical ? -1
+      : Math.max(slotSize, glyphPaintedWidth + Style.spaceReal(8))
+    fontSize: Style.font.caption
+    foreground: root.vaultState === "absent" ? Qt.alpha(root.fg, 0.4) : root.fg
+    tooltipText: Model.panelTooltip(root.vaultState, anubis.status,
+                                    anubis.engineMissing)
+
+    onPressed: function (buttonCode) {
+      if (buttonCode === Qt.RightButton) {
+        anubis.probeEngine()
+        return
+      }
+      if (root.bar && root.bar.shell)
+        root.bar.shell.summon("khephri.anubis", "{}")
+    }
+
+    // State dot. Kept off the glyph baseline so it reads as an indicator
+    // rather than part of the icon, and pulsed only while the engine is
+    // actually moving bytes.
+    Rectangle {
+      id: dot
+      width: Style.spaceReal(5)
+      height: width
+      radius: width / 2
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.rightMargin: Style.spaceReal(2)
+      anchors.topMargin: Style.spaceReal(3)
+      color: root.stateColor()
+      opacity: anubis.opBusy ? 0.35 : 1.0
+      visible: !root.vertical
+
+      SequentialAnimation on opacity {
+        running: anubis.opBusy && dot.visible && root.motionEnabled
+        loops: Animation.Infinite
+        NumberAnimation { to: 1.0; duration: 420 }
+        NumberAnimation { to: 0.35; duration: 420 }
+      }
+    }
+  }
+}

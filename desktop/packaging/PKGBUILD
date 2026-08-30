@@ -1,0 +1,45 @@
+# Maintainer: Anubis Quantum Cipher <https://github.com/AnubisQuantumCipher>
+
+pkgname=anubis-desktop
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Post-quantum file encryption vault -- desktop front end for the ANUBIS engine"
+arch=('x86_64' 'aarch64')
+url="https://github.com/AnubisQuantumCipher/anubis"
+license=('MIT' 'Apache-2.0')
+
+# The engine is a hard dependency, not an optional one: this package draws
+# `anubis` output and can do nothing without it. It is a separate package
+# because the engine is useful on its own, on machines with no display.
+depends=('qt6-base' 'qt6-declarative' 'qt6-svg' 'anubis')
+
+# xdg-desktop-portal backs the file chooser; without one every path can still
+# be typed or dropped. nautilus-python is what loads the right-click menu.
+optdepends=('xdg-desktop-portal-gtk: native file chooser'
+            'xdg-desktop-portal-hyprland: native file chooser on Hyprland'
+            'nautilus-python: Encrypt/Decrypt items in the Nautilus context menu')
+
+makedepends=('cmake' 'ninja')
+
+# The desktop application lives in the desktop/ directory of the engine's
+# repository and releases with it, under the same tag.
+source=("anubis-${pkgver}.tar.gz::${url}/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cmake -S "${srcdir}/anubis-${pkgver}/desktop" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build
+}
+
+package() {
+  DESTDIR="${pkgdir}" cmake --install build
+
+  install -Dm0644 "${srcdir}/anubis-${pkgver}/LICENSE-MIT" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+  install -Dm0644 "${srcdir}/anubis-${pkgver}/LICENSE-APACHE" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-APACHE"
+}
+
+# vim:set ts=2 sw=2 et:

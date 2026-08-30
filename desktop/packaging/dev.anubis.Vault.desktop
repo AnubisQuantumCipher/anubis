@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=ANUBIS Vault
+GenericName=File Encryption
+Comment=Post-quantum file encryption: X25519 + ML-KEM-1024, ML-DSA-87 signatures
+Exec=anubis-desktop %f
+TryExec=anubis-desktop
+Icon=dev.anubis.Vault
+Terminal=false
+Categories=Utility;Security;Archiving;
+Keywords=encryption;decrypt;post-quantum;PQC;ML-KEM;ML-DSA;signature;vault;
+MimeType=application/vnd.anubis.container;
+StartupNotify=true
+StartupWMClass=anubis-desktop
+SingleMainWindow=true

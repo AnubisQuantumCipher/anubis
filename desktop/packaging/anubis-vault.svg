@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>ANUBIS Vault</title>
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#0b0e0c"/>
+  <!-- A shield whose shoulders rise into jackal ears, with a keyhole cut
+       through it. Two shapes and two colours, so it survives being drawn at
+       16 pixels in a taskbar. -->
+  <path fill="#e0a83a"
+        d="M 44 24
+           L 104 60
+           L 128 72
+           L 152 60
+           L 212 24
+           L 198 112
+           C 198 170, 168 208, 128 228
+           C 88 208, 58 170, 58 112
+           Z"/>
+  <circle cx="128" cy="134" r="21" fill="#0b0e0c"/>
+  <path fill="#0b0e0c" d="M 117 149 L 110 192 L 146 192 L 139 149 Z"/>
+</svg>
