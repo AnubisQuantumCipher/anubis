@@ -167,12 +167,26 @@ readonly ready_fifo="$work_dir/session.ready"
 readonly proof_log="$work_dir/kani.log"
 mkfifo -- "$ready_fifo"
 
-if ! command -v rg >/dev/null 2>&1; then
-    echo "ripgrep is required to inventory Kani cover obligations" >&2
+cover_inventory="$work_dir/cover-inventory.txt"
+set +e
+if command -v rg >/dev/null 2>&1; then
+    rg -o --glob '*.rs' 'kani::cover!' crates >"$cover_inventory"
+    cover_search_status=$?
+elif command -v grep >/dev/null 2>&1; then
+    grep -Rho --include='*.rs' -- 'kani::cover!' crates >"$cover_inventory"
+    cover_search_status=$?
+else
+    cover_search_status=127
+fi
+set -e
+# Both search tools use status 1 for a valid empty result. Any other nonzero
+# status means the inventory itself was not trustworthy, so fail closed.
+if (( cover_search_status > 1 )); then
+    echo "could not search source for Kani cover obligations" >&2
     exit 1
 fi
 if [[ -z "$selected_harness" ]]; then
-    expected_cover_total=$(rg -o --glob '*.rs' 'kani::cover!' crates | wc -l)
+    expected_cover_total=$(wc -l <"$cover_inventory")
     expected_cover_total=${expected_cover_total//[[:space:]]/}
 else
     case "$selected_harness" in

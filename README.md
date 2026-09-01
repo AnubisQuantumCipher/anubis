@@ -730,8 +730,9 @@ cargo test --all-features
 ```
 
 The formal lane is separate. It additionally requires common Linux host
-utilities (including `bash`, `setsid`, `ps`, `awk`, `tee`, and `rg`) plus the
-version-pinned Kani verifier:
+utilities (including `bash`, `setsid`, `ps`, `awk`, and `tee`), either `rg` or
+GNU `grep`, and the version-pinned Kani verifier. The proof inventory prefers
+`rg` and falls back to GNU `grep` when `rg` is unavailable:
 
 ```sh
 cargo install --locked --version 0.67.0 kani-verifier
