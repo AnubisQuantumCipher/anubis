@@ -188,9 +188,9 @@ and nothing survives a crash -- and copied to stdout only after everything
 checks out. Corrupting the last chunk of a 256 MiB container and decrypting to
 stdout emits zero bytes and exits 1, signed and unsigned alike. The one
 resource this costs is **temporary disk space equal to the plaintext**, not
-memory. If `TMPDIR` is not writable the tool falls back to holding the
-plaintext in memory, which is slower on space but never less safe; verified by
-pointing `TMPDIR` at an unwritable directory and getting byte-identical output.
+memory. If private staging cannot be created in `TMPDIR`, decryption fails
+closed before emitting plaintext. It never falls back to a container-sized
+memory allocation.
 
 Omitting `-o` on a *file* input still derives the output path rather than
 writing to stdout: `encrypt` appends `.anubis`, or `.anubis.txt` when armoring;
@@ -355,7 +355,7 @@ Flags, in full:
 |---|---|
 | `keygen` | `--name NAME` `--force` |
 | `encrypt` | `-r/--recipient KEY_OR_LABEL` `-R/--recipients-file FILE` `--sign` `--identity NAME` `-a/--armor` `-o/--output PATH` `--force` |
-| `decrypt` | `--identity NAME` `-o/--output PATH` `--force` `--require-signature` `--signer FINGERPRINT` |
+| `decrypt` | `--identity NAME` `-o/--output PATH` `--force` `--require-signature` `--signer FINGERPRINT` `--expect-content-id SHA512_HEX` |
 | `inspect` | (no flags beyond `--json`) |
 | `verify` | `--signer FINGERPRINT` |
 | `status` | (no flags beyond `--json`) |
@@ -386,12 +386,17 @@ signature, so "nothing to check" is not a pass. See
 [docs/VERIFYING.md](docs/VERIFYING.md) to do the same check with stock OpenSSL
 and no ANUBIS code at all.
 
-Every command accepts `--json` and emits single-line JSON objects on stdout.
-That surface is stable and is what the GUI consumes.
+Every command has a `--json` interface that emits single-line JSON objects on
+stdout. The one deliberately rejected combination is `encrypt` or `decrypt`
+when the payload itself is also directed to stdout, explicitly with `-o -` or
+implicitly by using stdin without `-o`. A byte stream and control records cannot
+safely share one descriptor: choose `-o FILE` for the payload or omit `--json`.
+The rejection happens before input or keys are opened, writes no stdout bytes,
+and puts its diagnostic on stderr. This JSON surface is what the GUI consumes.
 
 ```sh
 anubis status --json | jq '{version, kem: .suite.kem, ids: [.identities[].name]}'
-anubis inspect f.anubis --json | jq '{format, signed, signer_fingerprint, payload_bytes, chunks}'
+anubis inspect f.anubis --json | jq '{format, content_id, signed, signer_fingerprint, payload_bytes, chunks}'
 anubis status --json | jq -r '.identities[] | "\(.name) recipient=\(.fingerprint) signer=\(.signing_fingerprint)"'
 anubis encrypt -r "$ME" big.iso -o big.iso.anubis --json \
   | jq -c 'select(.kind=="progress") | .pct'
@@ -404,14 +409,34 @@ when the container is unsigned. `status --json` carries `signing_fingerprint`
 per identity alongside the recipient `fingerprint`; the two are over different
 keys and are never interchangeable.
 
+Successful `inspect --json`, `verify --json`, and `decrypt --json` records carry
+the same `content_id`: lowercase hexadecimal SHA-512 over the complete decoded
+binary container, including a signature trailer when present. It binds UI state
+to bytes rather than to a pathname. ASCII armor and its decoded binary form
+therefore have the same content ID.
+
+Bind a decrypt to bytes that were already inspected and verified with
+`--expect-content-id`. It accepts exactly 128 hexadecimal characters (either
+case), compares the decoded value, and refuses before publishing any staged
+plaintext when it differs:
+
+```sh
+ID="$(anubis verify --json report.anubis | jq -r .content_id)"
+anubis decrypt --require-signature --signer "$EXPECTED_SIGNER" \
+  --expect-content-id "$ID" report.anubis -o report.pdf
+```
+
+The content-ID check binds the file, while `--signer` binds its provenance;
+use both when a file can change between verification and decryption.
+
 `inspect` reports `header_mac_ok` as `null`, not `false`, because it does not
 decrypt: the header MAC key is derived from the file key, so only a recipient
 can verify it. Treat `null` as "not checked", never as "failed". A successful
 `decrypt --json` reports `header_mac_ok: true`.
 
-`inspect` reports `signature_ok` as `null` for the same reason in a different
-key: checking a signature means hashing the whole payload, which `inspect`
-does not do. `verify --json` emits exactly one `{"kind":"verify"}` object
+`inspect` reports `signature_ok` as `null` because it identifies the complete
+container but does not perform ML-DSA verification. `verify --json` emits
+exactly one `{"kind":"verify"}` object
 carrying `ok`, `signed`, `signature_ok`, `signer_fingerprint`,
 `signer_matches`, and the size fields. Its `signature_ok` is `true`, `false`,
 or `null`, and all three are distinct: `null` means the check could not be
@@ -535,11 +560,13 @@ is never visible to the regex.
 | Signatures (optional) | ML-DSA-87 | FIPS 204 | `ml-dsa` |
 | AEAD | ChaCha20-Poly1305, STREAM, 64 KiB chunks | RFC 8439 | `chacha20poly1305` |
 | Header MAC | HMAC-SHA-512 | RFC 2104 | `hmac`, `sha2` |
-| Key encoding | Bech32 | BIP-173 | `bech32` |
+| Key encoding | Bech32m | BIP-350 | `bech32` |
 
 Recipients are `anubis1...` (1600-byte payload). Identities are
 `ANUBIS-SECRET-KEY-1...` (128-byte payload, 230 characters) and are
 capability-complete: one identity both decrypts and signs.
+Writers emit Bech32m. Readers also accept the legacy BIP-173 Bech32 checksum
+for compatibility, then canonicalize the key back to Bech32m.
 
 The KEM combiner binds the full recipient transcript into the HKDF salt:
 

@@ -6,6 +6,12 @@ void StdioCollector::setWaitForEnd(bool value) {
   emit waitForEndChanged();
 }
 
+void StdioCollector::reset() {
+  if (mText.isEmpty()) return;
+  mText.clear();
+  emit textChanged();
+}
+
 void StdioCollector::feed(const QString& chunk) {
   if (chunk.isEmpty()) return;
   mText += chunk;
@@ -19,6 +25,8 @@ void SplitParser::setSplitMarker(const QString& marker) {
   mMarker = marker;
   emit splitMarkerChanged();
 }
+
+void SplitParser::reset() { mBuffer.clear(); }
 
 void SplitParser::feed(const QString& chunk) {
   if (mMarker.isEmpty()) {

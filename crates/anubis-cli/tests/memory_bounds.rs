@@ -17,7 +17,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 fn bin() -> &'static str {
@@ -132,8 +132,14 @@ fn large_decrypt_is_constant_memory() {
     // 64 MiB is large enough that buffering would be unmistakable and small
     // enough to keep the suite quick.
     let plain = h.join("big.bin");
-    let data = vec![7u8; 64 << 20];
-    std::fs::write(&plain, &data).unwrap();
+    // Write without ever allocating the whole payload in this parent test
+    // process. Some kernels carry a forked parent's VmHWM across exec; holding
+    // this payload here made the child's high-water mark intermittently look
+    // like buffering even when the CLI stayed constant-memory.
+    let mut plain_file = std::fs::File::create(&plain).unwrap();
+    std::io::copy(&mut std::io::repeat(7).take(64 << 20), &mut plain_file).unwrap();
+    plain_file.flush().unwrap();
+    drop(plain_file);
     let sealed = h.join("big.anubis");
 
     let out = Command::new(bin())
@@ -151,6 +157,25 @@ fn large_decrypt_is_constant_memory() {
         .output()
         .expect("encrypt");
     assert!(out.status.success(), "encrypt failed");
+
+    // `inspect -` has no length metadata. It must consume the complete stream
+    // to count payload bytes and bind the content ID, but its memory must not
+    // grow with that stream.
+    let inspect_input = std::fs::File::open(&sealed).expect("open sealed input");
+    let inspect_child = Command::new(bin())
+        .args(["inspect", "-"])
+        .env("HOME", &h)
+        .stdin(Stdio::from(inspect_input))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn inspect");
+    let (inspect_hw, inspect_ok) = watch_to_completion(inspect_child);
+    assert!(inspect_ok, "inspect from unknown-length stdin failed");
+    assert!(
+        inspect_hw < 32 * 1024,
+        "peak RSS {inspect_hw} KiB while inspecting stdin suggests container buffering"
+    );
 
     let restored = h.join("big.out");
     let child = Command::new(bin())
@@ -171,7 +196,7 @@ fn large_decrypt_is_constant_memory() {
     assert!(ok, "decrypt failed");
     assert_eq!(
         std::fs::read(&restored).unwrap(),
-        data,
+        std::fs::read(&plain).unwrap(),
         "round trip differs"
     );
     // Measured baseline is ~3.2 MiB regardless of size; 32 MiB catches a

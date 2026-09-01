@@ -579,6 +579,178 @@ function parseLine(line) {
   } catch (e) { return null }
 }
 
+// Machine-readable status is a protocol, not a bag of optional UI hints.
+// Requiring the complete top-level shape prevents a truncated or unrelated
+// `{"kind":"status"}` line from turning the vault health indicator green.
+function validStatusRecord(o) {
+  if (!o || o.kind !== "status") return false
+  if (typeof o.version !== "string" || o.version === "") return false
+  if (typeof o.generated !== "string" || o.generated === "") return false
+  if (!Array.isArray(o.identities) || !Array.isArray(o.recipients)
+      || !Array.isArray(o.recent)) return false
+  var s = o.suite
+  if (!s || typeof s !== "object") return false
+  if (typeof s.kem !== "string" || s.kem === "") return false
+  if (typeof s.sig !== "string" || s.sig === "") return false
+  if (typeof s.aead !== "string" || s.aead === "") return false
+  if (typeof s.kdf !== "string" || s.kdf === "") return false
+  if (typeof s.format !== "string" || s.format === "") return false
+  if (typeof s.pure_rust !== "boolean" || !Array.isArray(s.fips)) return false
+  var c = o.counts
+  if (!c || typeof c !== "object") return false
+  var names = ["encrypt", "decrypt", "failed"]
+  for (var i = 0; i < names.length; i++) {
+    var value = c[names[i]]
+    if (typeof value !== "number" || !isFinite(value) || value < 0)
+      return false
+  }
+  return true
+}
+
+// SHA-512 over the exact decoded binary container, including any signature
+// trailer. The engine emits lowercase hex with no prefix. No fallback is
+// allowed: path, size and header fields do not identify immutable bytes.
+function contentId(record) {
+  var value = record ? String(record.content_id || "") : ""
+  return /^[0-9a-f]{128}$/.test(value) ? value : ""
+}
+
+// A child may finish after its caller cancelled it and selected another file.
+// Generation and target must both match before any of that child's output can
+// mutate visible state. Kept pure so the asynchronous boundary is executable
+// in the QML protocol tests rather than source-reviewed only.
+function runIsCurrent(runGeneration, runTarget, currentGeneration,
+                      currentTarget) {
+  var target = String(runTarget || "")
+  return target !== "" && runGeneration === currentGeneration
+    && target === String(currentTarget || "")
+}
+
+// Decide whether one parsed inspect response is eligible to become current
+// state. Content identity is deliberately not required here: an older engine
+// may still expose neutral header metadata, while the attestation helpers
+// below independently fail closed when contentId() is empty.
+function inspectRecordAccepted(record, exitCode, protocolValid, recordCount,
+                               reportedError, expectedPath) {
+  if (exitCode !== 0 || protocolValid !== true
+      || String(reportedError || "") !== ""
+      || !record || record.kind !== "inspect" || recordCount !== 1
+      || String(record.path || "") !== String(expectedPath || "")) return false
+
+  // `inspect` reports presence only. It cannot verify either keyed state, so
+  // accepting a boolean verdict here would let malformed engine output paint
+  // VERIFIED without doing the corresponding cryptographic operation.
+  if (record.signed !== true && record.signed !== false) return false
+  if (record.header_mac_ok !== null && record.header_mac_ok !== undefined)
+    return false
+  if (record.signature_ok !== null && record.signature_ok !== undefined)
+    return false
+
+  var signer = formatFingerprint(record.signer_fingerprint)
+  if (record.signed === true && !validFingerprint(signer)) return false
+  if (record.signed === false
+      && record.signer_fingerprint !== null
+      && record.signer_fingerprint !== undefined
+      && String(record.signer_fingerprint) !== "") return false
+
+  return typeof record.format === "string" && record.format !== ""
+    && typeof record.recipients === "number" && isFinite(record.recipients)
+    && record.recipients >= 0
+    && typeof record.header_bytes === "number" && isFinite(record.header_bytes)
+    && record.header_bytes >= 0
+    && typeof record.payload_bytes === "number" && isFinite(record.payload_bytes)
+    && record.payload_bytes >= 0
+    && typeof record.chunks === "number" && isFinite(record.chunks)
+    && record.chunks >= 0
+}
+
+// A successful decrypt result is eligible to become an authentication
+// attestation only when its entire security envelope is coherent. This is
+// intentionally stricter than the generic operation record: `signed:false`
+// cannot carry a positive signature verdict, and a signed success must name
+// the exact signer whose signature was checked.
+function decryptResultAccepted(record, exitCode, protocolValid, recordCount,
+                               expectedPath, expectedOutput) {
+  if (exitCode !== 0 || protocolValid !== true || !record
+      || record.kind !== "result" || recordCount !== 1
+      || record.ok !== true || record.op !== "decrypt"
+      || String(record.path || "") !== String(expectedPath || "")
+      || String(record.out || "") !== String(expectedOutput || "")
+      || typeof record.bytes !== "number" || !isFinite(record.bytes)
+      || record.bytes < 0 || record.header_mac_ok !== true
+      || contentId(record) === ""
+      || (record.signed !== true && record.signed !== false)) return false
+
+  if (record.signed === true) {
+    return record.signature_ok === true
+      && validFingerprint(record.signer_fingerprint)
+  }
+  return (record.signature_ok === null || record.signature_ok === undefined)
+    && (record.signer_fingerprint === null
+        || record.signer_fingerprint === undefined
+        || String(record.signer_fingerprint) === "")
+}
+
+// Classify a verify response without mutating UI state. Only `verified` may
+// promote a signature. `rejected` is a valid negative cryptographic verdict;
+// every other value means no verdict may be retained.
+function verifyRecordDecision(record, exitCode, protocolValid, recordCount,
+                              expectedContentId, expectedSigner) {
+  if (protocolValid !== true || !record || record.kind !== "verify"
+      || recordCount !== 1) return "record-invalid"
+
+  // A cryptographic verdict is meaningful only when the record's envelope
+  // agrees with it. Do not let a truncated or contradictory object such as
+  // `signature_ok:true, signed:false` promote the UI merely because the two
+  // identity fields happen to match.
+  if (typeof record.ok !== "boolean"
+      || (record.signed !== true && record.signed !== false))
+    return "record-invalid"
+
+  var actualContentId = contentId(record)
+  if (actualContentId === "" || actualContentId !== expectedContentId)
+    return "content-mismatch"
+
+  // This tuple is the only coherent unsigned response. The current desktop
+  // never launches verify for an unsigned inspection, but retaining the
+  // protocol state keeps this pure classifier complete and prevents a future
+  // caller from turning absence into a failed-signature attestation.
+  if (record.signed === false) {
+    var noSigner = record.signer_fingerprint === null
+      || record.signer_fingerprint === undefined
+      || String(record.signer_fingerprint) === ""
+    var noVerdict = record.signature_ok === null
+      || record.signature_ok === undefined
+    if (String(expectedSigner || "") !== "" || !noSigner || !noVerdict
+        || record.ok !== false || exitCode === 0) return "record-invalid"
+    return "verdict-missing"
+  }
+
+  var actualSigner = formatFingerprint(record.signer_fingerprint)
+  if (!validFingerprint(actualSigner) || !validFingerprint(expectedSigner)
+      || actualSigner !== expectedSigner)
+    return "signer-mismatch"
+
+  if (record.signature_ok !== true && record.signature_ok !== false)
+    return "verdict-missing"
+  if (record.ok !== (record.signature_ok === true)) return "record-invalid"
+  if (record.signature_ok === true && exitCode !== 0) return "exit-failed"
+  if (record.signature_ok === false && exitCode === 0) return "record-invalid"
+  return record.signature_ok === true ? "verified" : "rejected"
+}
+
+function attestationMatches(inspect, attested) {
+  var id = contentId(inspect)
+  return id !== "" && !!attested && attested.content_id === id
+}
+
+function signatureAttestationMatches(inspect, attested) {
+  if (!attestationMatches(inspect, attested)) return false
+  var current = signerFingerprint(inspect)
+  var checked = formatFingerprint(attested.fingerprint)
+  return current !== "" && validFingerprint(current) && checked === current
+}
+
 // ------------------------------------------------------------- inspector
 
 function stanzaRows(inspect) {
@@ -624,22 +796,22 @@ function macExplanation(inspect) {
 // only when such a decrypt actually happened for this exact container, and
 // they say so -- the claim is about a check that ran, not about the file's
 // general trustworthiness.
-function macToneAttested(inspect, attestedAt) {
+function macToneAttested(inspect, attested) {
   var tone = macTone(inspect)
   if (tone !== "unknown") return tone
-  return String(attestedAt || "") !== "" ? "good" : "unknown"
+  return attestationMatches(inspect, attested) ? "good" : "unknown"
 }
 
-function macLabelAttested(inspect, attestedAt) {
+function macLabelAttested(inspect, attested) {
   if (macTone(inspect) !== "unknown") return macLabel(inspect)
-  return String(attestedAt || "") !== ""
+  return attestationMatches(inspect, attested)
     ? "HEADER MAC VERIFIED BY DECRYPT" : macLabel(inspect)
 }
 
-function macExplanationAttested(inspect, attestedAt) {
+function macExplanationAttested(inspect, attested) {
   if (macTone(inspect) !== "unknown") return macExplanation(inspect)
-  var at = String(attestedAt || "")
-  if (at === "") return macExplanation(inspect)
+  if (!attestationMatches(inspect, attested)) return macExplanation(inspect)
+  var at = String(attested.at || "")
   return "A decrypt of this container at " + stampClock(at)
     + " checked the header MAC and it matched. inspect cannot re-check it "
     + "on its own, because it holds no key."
@@ -726,20 +898,22 @@ function signatureExplanation(inspect) {
 function signatureToneAttested(inspect, attested) {
   var tone = signatureTone(inspect)
   if (tone !== "notice") return tone
-  if (!attested) return tone
+  if (!signatureAttestationMatches(inspect, attested)) return tone
   return attested.ok === true ? "good" : "bad"
 }
 
 function signatureLabelAttested(inspect, attested) {
   var tone = signatureTone(inspect)
-  if (tone !== "notice" || !attested) return signatureLabel(inspect)
+  if (tone !== "notice" || !signatureAttestationMatches(inspect, attested))
+    return signatureLabel(inspect)
   return attested.ok === true ? "SIGNATURE VERIFIED -- ML-DSA-87"
                               : "SIGNATURE FAILED"
 }
 
 function signatureExplanationAttested(inspect, attested) {
   var tone = signatureTone(inspect)
-  if (tone !== "notice" || !attested) return signatureExplanation(inspect)
+  if (tone !== "notice" || !signatureAttestationMatches(inspect, attested))
+    return signatureExplanation(inspect)
   if (attested.ok !== true)
     return "A verify of this container at " + stampClock(attested.at)
       + " checked the ML-DSA-87 signature and it did NOT match. "
@@ -762,19 +936,26 @@ function isMigrationNotice(text) {
   return /see MIGRATION\.md/.test(String(text || ""))
 }
 
+function isContentIdNotice(text) {
+  return /^content identity unavailable:/.test(String(text || ""))
+}
+
 // "notice" is a third tone alongside good/bad/neutral, and the only one an
 // error string can map to without implying tampering.
 function noticeTone(text) {
   if (String(text || "") === "") return "neutral"
-  return isMigrationNotice(text) ? "notice" : "bad"
+  return isMigrationNotice(text) || isContentIdNotice(text) ? "notice" : "bad"
 }
 
 function noticeGlyph(text) {
-  return isMigrationNotice(text) ? GLYPH.info : GLYPH.alert
+  return isMigrationNotice(text) || isContentIdNotice(text)
+    ? GLYPH.info : GLYPH.alert
 }
 
 function noticeHeading(text) {
   if (String(text || "") === "") return ""
+  if (isContentIdNotice(text))
+    return "ENGINE UPGRADE REQUIRED FOR BYTE-BOUND ATTESTATIONS"
   return isMigrationNotice(text)
     ? "LEGACY CONTAINER -- UPGRADE PATH, NOT A FAILURE"
     : "HEADER COULD NOT BE READ"
@@ -783,6 +964,9 @@ function noticeHeading(text) {
 // The engine names the legacy generation in its own message; this only adds
 // what to do about it, and never restates the version itself.
 function noticeAdvice(text) {
+  if (isContentIdNotice(text))
+    return "Header fields remain visible, but this session will not reuse "
+      + "a MAC or signature verdict without an immutable SHA-512 content ID."
   return isMigrationNotice(text)
     ? "This container predates the ANUBIS/v3 wire format and is not "
       + "interoperable with it. Its integrity is not in question here -- "

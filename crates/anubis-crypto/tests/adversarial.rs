@@ -5,13 +5,13 @@
 //! corruption instead of sampling it, and every test here is written so that
 //! a plausible implementation bug flips it red.
 //!
-//! Two behaviours documented here are ACTUAL, verified behaviour rather than
-//! what a reader might assume. Both are side effects rather than bypasses --
-//! decryption still returns `Err` when it must:
+//! Two behaviours documented here belong specifically to the explicitly
+//! provisional decryption APIs. Both are side effects rather than bypasses --
+//! provisional decryption still returns `Err` when it must:
 //!
 //! 1. Plaintext reaches the writer BEFORE the ML-DSA-87 trailer is checked
-//!    (`signature_failure_still_streams_plaintext_to_the_writer`). Inherent
-//!    to streaming; the caller must not publish output on `Err`.
+//!    (`signature_failure_still_streams_plaintext_to_the_provisional_writer`).
+//!    Inherent to streaming; the caller must not publish output on `Err`.
 //! 2. A multi-chunk file extended with junk emits a decrypted PREFIX before
 //!    erroring (`extending_a_multichunk_file_never_yields_whole_plaintext`).
 //!    Same rule for the caller.
@@ -29,12 +29,14 @@ use std::io::Read;
 use anubis_crypto::Error;
 use anubis_crypto::armor;
 use anubis_crypto::format::{
-    self, Decrypted, EncryptOptions, Header, MAX_HEADER_LINE, MAX_STANZAS, SIG_LEN, WRAPPED_LEN,
+    self, Decrypted, DecryptionReport, EncryptOptions, Header, MAX_HEADER_LINE, MAX_STANZAS,
+    SIG_LEN, WRAPPED_LEN,
 };
 use anubis_crypto::keys::{
     IDENTITY_LEN, Identity, MLDSA_VK_LEN, MLKEM_CT_LEN, RECIPIENT_LEN, Recipient, X25519_PUB_LEN,
 };
 use anubis_crypto::stream::{CHUNK, TAG};
+use sha2::{Digest, Sha512};
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -58,6 +60,17 @@ fn open_raw(sealed: &[u8], ids: &[Identity]) -> (anubis_crypto::Result<Decrypted
     (res, out)
 }
 
+/// Decrypt through the explicitly provisional sized API.
+fn open_provisional_raw(
+    sealed: &[u8],
+    ids: &[Identity],
+) -> (anubis_crypto::Result<DecryptionReport>, Vec<u8>) {
+    let mut out = Vec::new();
+    let len = sealed.len() as u64;
+    let res = format::decrypt_provisional(ids, &mut &sealed[..], len, &mut out, |_| {});
+    (res, out)
+}
+
 /// Decrypt with a caller-supplied `total_len` that need not match the slice.
 fn open_with_len(
     sealed: &[u8],
@@ -69,6 +82,17 @@ fn open_with_len(
     (res, out)
 }
 
+/// Provisional sized decrypt with a caller-supplied length.
+fn open_provisional_with_len(
+    sealed: &[u8],
+    ids: &[Identity],
+    total_len: u64,
+) -> (anubis_crypto::Result<DecryptionReport>, Vec<u8>) {
+    let mut out = Vec::new();
+    let res = format::decrypt_provisional(ids, &mut &sealed[..], total_len, &mut out, |_| {});
+    (res, out)
+}
+
 /// Decrypt through the unknown-length (pipe) path.
 fn open_unsized<R: Read>(
     reader: R,
@@ -76,6 +100,16 @@ fn open_unsized<R: Read>(
 ) -> (anubis_crypto::Result<Decrypted>, Vec<u8>) {
     let mut out = Vec::new();
     let res = format::decrypt_unsized(ids, reader, &mut out, |_| {});
+    (res, out)
+}
+
+/// Decrypt through the explicitly provisional unknown-length API.
+fn open_unsized_provisional<R: Read>(
+    reader: R,
+    ids: &[Identity],
+) -> (anubis_crypto::Result<DecryptionReport>, Vec<u8>) {
+    let mut out = Vec::new();
+    let res = format::decrypt_unsized_provisional(ids, reader, &mut out, |_| {});
     (res, out)
 }
 
@@ -277,7 +311,7 @@ fn every_single_bit_flip_in_a_signed_file_is_rejected() {
     for (off, mask) in probes {
         let mut bad = sealed.clone();
         bad[off] ^= mask;
-        let (res, out) = open_raw(&bad, std::slice::from_ref(&id));
+        let (res, out) = open_provisional_raw(&bad, std::slice::from_ref(&id));
         let err = match res {
             Ok(_) => panic!("bit {mask:#04x} at offset {off} decrypted successfully"),
             Err(e) => e,
@@ -289,10 +323,10 @@ fn every_single_bit_flip_in_a_signed_file_is_rejected() {
                 out.len()
             );
         } else {
-            // DOCUMENTED BEHAVIOUR: a corrupt trailer is only detected after
-            // the payload has been decrypted and streamed out. The error is
-            // always BadSignature, and the caller is responsible for
-            // discarding the output it already received.
+            // PROVISIONAL-API BEHAVIOUR: a corrupt trailer is only detected
+            // after the payload has been decrypted into caller-owned private
+            // staging. The error is always BadSignature, and the caller is
+            // responsible for discarding that staging output.
             assert!(
                 matches!(err, Error::BadSignature),
                 "trailer corruption at {off} gave {err} instead of a signature failure"
@@ -362,7 +396,7 @@ fn truncating_a_multichunk_payload_yields_only_a_prefix() {
 
     // Drop the whole final chunk. The STREAM final-flag rule must catch it.
     let cut = sealed.len() - (77 + TAG);
-    let (res, out) = open_raw(&sealed[..cut], std::slice::from_ref(&id));
+    let (res, out) = open_provisional_raw(&sealed[..cut], std::slice::from_ref(&id));
     assert!(res.is_err(), "dropping the final chunk was not detected");
     assert!(
         out.len() < msg.len(),
@@ -393,7 +427,7 @@ fn a_lying_total_length_is_rejected() {
     // bytes, and an attacker who appends to the file instead is caught by
     // the chunk tag with no output at all (see the extension tests).
     for extra in [1u64, 16, 4096] {
-        let (res, out) = open_with_len(
+        let (res, out) = open_provisional_with_len(
             &sealed,
             std::slice::from_ref(&id),
             sealed.len() as u64 + extra,
@@ -512,8 +546,14 @@ fn extending_a_multichunk_file_never_yields_whole_plaintext() {
         let mut bad = sealed.clone();
         bad.extend(std::iter::repeat_n(0xC3, extra));
         for (label, (res, out)) in [
-            ("sized", open_raw(&bad, std::slice::from_ref(&id))),
-            ("unsized", open_unsized(&bad[..], std::slice::from_ref(&id))),
+            (
+                "sized",
+                open_provisional_raw(&bad, std::slice::from_ref(&id)),
+            ),
+            (
+                "unsized",
+                open_unsized_provisional(&bad[..], std::slice::from_ref(&id)),
+            ),
         ] {
             assert!(
                 res.is_err(),
@@ -1670,14 +1710,13 @@ fn a_signature_from_the_wrong_key_is_rejected() {
 }
 
 #[test]
-fn signature_failure_still_streams_plaintext_to_the_writer() {
+fn signature_failure_still_streams_plaintext_to_the_provisional_writer() {
     // DOCUMENTED BEHAVIOUR. ANUBIS streams: the payload is decrypted and
     // written chunk by chunk, and the ML-DSA-87 trailer can only be checked
     // once the whole payload has been read. So on a signature failure the
-    // caller has ALREADY received the plaintext, even though decrypt()
-    // returns Err. Buffering instead would cap file size at RAM, so this is
-    // the right trade -- but every caller MUST discard its output on Err
-    // rather than publishing it.
+    // provisional caller has ALREADY received the plaintext, even though
+    // decrypt_provisional() returns Err. Every caller of that primitive MUST
+    // discard its private staging output on Err rather than publishing it.
     let signer = Identity::generate().unwrap();
     let id = Identity::generate().unwrap();
     let r = id.to_recipient().unwrap();
@@ -1686,7 +1725,7 @@ fn signature_failure_still_streams_plaintext_to_the_writer() {
     let n = sealed.len();
     sealed[n - 1] ^= 0x80;
 
-    let (res, out) = open_raw(&sealed, std::slice::from_ref(&id));
+    let (res, out) = open_provisional_raw(&sealed, std::slice::from_ref(&id));
     assert!(
         matches!(res, Err(Error::BadSignature)),
         "corrupt signature must fail"
@@ -1696,6 +1735,50 @@ fn signature_failure_still_streams_plaintext_to_the_writer() {
         "this test exists to pin the streaming side effect; if the \
          implementation starts buffering, update the CLI contract too"
     );
+}
+
+#[test]
+fn safe_decrypt_apis_publish_nothing_on_bad_signature_or_truncation() {
+    let signer = Identity::generate().unwrap();
+    let id = Identity::generate().unwrap();
+    let recipient = id.to_recipient().unwrap();
+    let plaintext = pseudo(CHUNK + 73, 0x5A5E);
+
+    let mut bad_signature = seal(&plaintext, std::slice::from_ref(&recipient), Some(&signer));
+    let last = bad_signature.len() - 1;
+    bad_signature[last] ^= 0x40;
+    for (label, (result, output)) in [
+        (
+            "sized bad signature",
+            open_raw(&bad_signature, std::slice::from_ref(&id)),
+        ),
+        (
+            "unsized bad signature",
+            open_unsized(&bad_signature[..], std::slice::from_ref(&id)),
+        ),
+    ] {
+        assert!(
+            matches!(result, Err(Error::BadSignature)),
+            "{label}: expected BadSignature"
+        );
+        assert!(output.is_empty(), "{label}: published plaintext");
+    }
+
+    let unsigned = seal(&plaintext, &[recipient], None);
+    let truncated = &unsigned[..unsigned.len() - 1];
+    for (label, (result, output)) in [
+        (
+            "sized truncation",
+            open_raw(truncated, std::slice::from_ref(&id)),
+        ),
+        (
+            "unsized truncation",
+            open_unsized(truncated, std::slice::from_ref(&id)),
+        ),
+    ] {
+        assert!(result.is_err(), "{label}: truncated container decrypted");
+        assert!(output.is_empty(), "{label}: published plaintext");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1760,9 +1843,12 @@ fn identity_decode_rejects_malformed_strings() {
     assert!(Identity::decode(&good).is_ok());
     // Bech32 is case-insensitive as a whole and the identity HRP is compared
     // case-insensitively, so the all-lowercase form must also decode.
-    assert!(
-        Identity::decode(&good.to_lowercase()).is_ok(),
-        "the lowercase form of an identity must decode"
+    let lowercase = good.to_lowercase();
+    let compatible = Identity::decode(&lowercase).expect("lowercase identity must decode");
+    assert_eq!(
+        compatible.encode().unwrap(),
+        good,
+        "lowercase identity must re-encode canonically"
     );
 
     let hrp_len = "ANUBIS-SECRET-KEY-1".len();
@@ -1818,13 +1904,23 @@ fn recipient_and_identity_encodings_are_not_interchangeable() {
     );
 
     // Keys arrive surrounded by whitespace in the wild (copy and paste).
-    assert!(
-        Recipient::decode(&format!("  {public}\n")).is_ok(),
-        "trimming is expected"
+    let wrapped_recipient = format!("  {public}\n");
+    assert_eq!(
+        Recipient::decode(&wrapped_recipient)
+            .expect("surrounding whitespace must be accepted")
+            .encode()
+            .unwrap(),
+        public,
+        "trimmed recipient must re-encode without whitespace"
     );
-    assert!(
-        Identity::decode(&format!("\t{secret}  \n")).is_ok(),
-        "trimming is expected"
+    let wrapped_identity = format!("\t{secret}  \n");
+    assert_eq!(
+        Identity::decode(&wrapped_identity)
+            .expect("surrounding whitespace must be accepted")
+            .encode()
+            .unwrap(),
+        secret,
+        "trimmed identity must re-encode without whitespace"
     );
 }
 
@@ -2285,6 +2381,121 @@ fn verify_refuses_a_swapped_signature() {
 }
 
 #[test]
+fn reporting_verify_binds_a_false_verdict_to_content_and_signer() {
+    let signer = Identity::generate().unwrap();
+    let recipient = Identity::generate().unwrap();
+    let mut sealed = seal(
+        &pseudo(CHUNK + 31, 0x00BA_D51A),
+        &[recipient.to_recipient().unwrap()],
+        Some(&signer),
+    );
+    let last = sealed.len() - 1;
+    sealed[last] ^= 0x20;
+    let expected_content_id: [u8; 64] = Sha512::digest(&sealed).into();
+    let expected_key = signer.verifying_key().encode().as_slice().to_vec();
+
+    let sized = format::verify_report(&sealed[..], sealed.len() as u64).unwrap();
+    let streamed = format::verify_unsized_report(choked(&sealed, 17)).unwrap();
+    for report in [&sized, &streamed] {
+        assert!(report.signed);
+        assert_eq!(report.signature_ok, Some(false));
+        assert_eq!(report.verifying_key.as_ref(), Some(&expected_key));
+        assert_eq!(report.content_id, expected_content_id);
+        assert!(report.payload_bytes >= TAG as u64);
+        assert!(report.chunks > 0);
+    }
+
+    assert!(matches!(
+        format::verify(&sealed[..], sealed.len() as u64),
+        Err(Error::BadSignature)
+    ));
+    assert!(matches!(
+        format::verify_unsized(&sealed[..]),
+        Err(Error::BadSignature)
+    ));
+}
+
+#[test]
+fn reporting_verify_never_turns_structural_failure_into_false() {
+    let signer = Identity::generate().unwrap();
+    let recipient = Identity::generate().unwrap();
+    let sealed = seal(
+        b"structural failures have no verdict",
+        &[recipient.to_recipient().unwrap()],
+        Some(&signer),
+    );
+    let header_len = header_len_of(&sealed);
+    let grossly_truncated = &sealed[..header_len + SIG_LEN - 1];
+
+    assert!(matches!(
+        format::verify_report(grossly_truncated, grossly_truncated.len() as u64),
+        Err(Error::Integrity(_))
+    ));
+    assert!(matches!(
+        format::verify_unsized_report(grossly_truncated),
+        Err(Error::Integrity(_))
+    ));
+    let malformed = b"not a container";
+    assert!(matches!(
+        format::verify_report(malformed.as_slice(), malformed.len() as u64),
+        Err(Error::Header(_))
+    ));
+    assert!(matches!(
+        format::verify_unsized_report(malformed.as_slice()),
+        Err(Error::Header(_))
+    ));
+}
+
+#[test]
+fn sized_full_container_apis_reject_bytes_beyond_the_declared_length() {
+    let signer = Identity::generate().unwrap();
+    let recipient = Identity::generate().unwrap();
+    let plaintext = pseudo(CHUNK + 19, 0xE0F0_0001);
+    let sealed = seal(
+        &plaintext,
+        &[recipient.to_recipient().unwrap()],
+        Some(&signer),
+    );
+    let declared_len = sealed.len() as u64;
+    let mut extended = sealed;
+    extended.extend_from_slice(b"suffix outside the declared container");
+
+    let mut safe_output = Vec::new();
+    let safe = format::decrypt(
+        std::slice::from_ref(&recipient),
+        &extended[..],
+        declared_len,
+        &mut safe_output,
+        |_| {},
+    );
+    assert!(matches!(safe, Err(Error::Integrity(_))));
+    assert!(safe_output.is_empty(), "safe decrypt published plaintext");
+
+    let mut provisional_output = Vec::new();
+    let provisional = format::decrypt_provisional(
+        std::slice::from_ref(&recipient),
+        &extended[..],
+        declared_len,
+        &mut provisional_output,
+        |_| {},
+    );
+    assert!(matches!(provisional, Err(Error::Integrity(_))));
+    assert_eq!(
+        provisional_output, plaintext,
+        "provisional API contract changed"
+    );
+
+    assert!(matches!(
+        format::verify(&extended[..], declared_len),
+        Err(Error::Integrity(_))
+    ));
+    assert!(matches!(
+        format::verify_report(&extended[..], declared_len),
+        Err(Error::Integrity(_))
+    ));
+}
+
+#[test]
 fn verify_refuses_a_truncated_container() {
     let signer = Identity::generate().unwrap();
     let to = Identity::generate().unwrap();
@@ -2366,4 +2577,152 @@ fn verify_never_emits_plaintext_and_handles_an_empty_payload() {
     // must account for it rather than reading the trailer as payload.
     assert!(v.payload_bytes >= TAG as u64);
     assert_eq!(v.chunks, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Remediation regressions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_contributory_x25519_inputs_are_rejected_on_both_sides() {
+    let id = Identity::generate().unwrap();
+    let mut payload = id.to_recipient().unwrap().to_payload();
+    payload[..X25519_PUB_LEN].fill(0);
+    let degenerate = Recipient::from_payload(&payload).unwrap();
+
+    let enc_err = match anubis_crypto::hybrid::encapsulate(&degenerate) {
+        Ok(_) => panic!("non-contributory recipient was accepted"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(enc_err, Error::Key(_)),
+        "unexpected encapsulation error: {enc_err}"
+    );
+
+    let epk = [0u8; X25519_PUB_LEN];
+    let ct = vec![0u8; MLKEM_CT_LEN];
+    let dec_err = anubis_crypto::hybrid::decapsulate(&id, &epk, &ct).unwrap_err();
+    assert!(
+        matches!(dec_err, Error::Header(_)),
+        "unexpected decapsulation error: {dec_err}"
+    );
+}
+
+#[test]
+fn parser_rejects_a_recipient_stanza_after_the_signature_stanza() {
+    let id = Identity::generate().unwrap();
+    let sealed = seal(b"ordering", &[id.to_recipient().unwrap()], Some(&id));
+    let header_len = header_len_of(&sealed);
+    let header = std::str::from_utf8(&sealed[..header_len]).unwrap();
+    let mut lines: Vec<&str> = header.lines().collect();
+    let mac = lines.pop().unwrap();
+    let recipient_line = lines[1];
+    let wrapped_line = lines[2];
+    lines.push(recipient_line);
+    lines.push(wrapped_line);
+    lines.push(mac);
+
+    let mut reordered = lines.join("\n").into_bytes();
+    reordered.push(b'\n');
+    reordered.extend_from_slice(&sealed[header_len..]);
+    let err = format::inspect(&reordered[..], reordered.len() as u64).unwrap_err();
+    assert!(
+        matches!(err, Error::Header(_)),
+        "recipient after signature was not a header error: {err}"
+    );
+}
+
+#[test]
+fn writer_refuses_too_many_recipients_before_writing() {
+    let id = Identity::generate().unwrap();
+    let recipient = id.to_recipient().unwrap();
+    let recipients = vec![recipient; MAX_STANZAS + 1];
+    let mut out = Vec::new();
+    let err = format::encrypt(
+        &EncryptOptions {
+            recipients: &recipients,
+            signer: None,
+        },
+        &mut &b"never written"[..],
+        &mut out,
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Key(_)), "unexpected error: {err}");
+    assert!(
+        out.is_empty(),
+        "recipient-cap failure wrote container bytes"
+    );
+}
+
+#[test]
+fn all_container_paths_reject_impossible_stream_geometry() {
+    let id = Identity::generate().unwrap();
+    let sealed = seal(b"geometry", &[id.to_recipient().unwrap()], None);
+    let header_len = header_len_of(&sealed);
+    let mut malformed = sealed[..header_len].to_vec();
+    malformed.resize(header_len + anubis_crypto::stream::CHUNK_CT + 1, 0);
+
+    assert!(format::inspect(&malformed[..], malformed.len() as u64).is_err());
+    assert!(format::inspect_unsized(&malformed[..]).is_err());
+    assert!(format::verify(&malformed[..], malformed.len() as u64).is_err());
+    assert!(format::verify_unsized(&malformed[..]).is_err());
+    let (sized, sized_out) = open_raw(&malformed, std::slice::from_ref(&id));
+    assert!(sized.is_err());
+    assert!(sized_out.is_empty());
+    let (streamed, unsized_out) = open_unsized(&malformed[..], std::slice::from_ref(&id));
+    assert!(streamed.is_err());
+    assert!(unsized_out.is_empty());
+}
+
+#[test]
+fn content_id_covers_the_complete_decoded_container() {
+    let signer = Identity::generate().unwrap();
+    let recipient = Identity::generate().unwrap();
+    let sealed = seal(
+        b"content identity",
+        &[recipient.to_recipient().unwrap()],
+        Some(&signer),
+    );
+    let expected: [u8; 64] = Sha512::digest(&sealed).into();
+
+    let header_only = format::inspect(&sealed[..], sealed.len() as u64).unwrap();
+    assert!(header_only.signed);
+
+    let sized = format::inspect_with_content_id(&sealed[..], sealed.len() as u64).unwrap();
+    let streamed = format::inspect_unsized(choked(&sealed, 17)).unwrap();
+    let verified = format::verify_report(&sealed[..], sealed.len() as u64).unwrap();
+    let verified_unsized = format::verify_unsized_report(choked(&sealed, 17)).unwrap();
+    let mut plaintext = Vec::new();
+    let decrypted = format::decrypt_report(
+        &[recipient],
+        &sealed[..],
+        sealed.len() as u64,
+        &mut plaintext,
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(sized.content_id, expected);
+    assert_eq!(streamed.content_id, expected);
+    assert_eq!(verified.content_id, expected);
+    assert_eq!(verified_unsized.content_id, expected);
+    assert_eq!(decrypted.content_id, expected);
+    assert_eq!(plaintext, b"content identity");
+}
+
+#[test]
+fn full_inspection_rejects_a_false_length_claim() {
+    let id = Identity::generate().unwrap();
+    let sealed = seal(b"length", &[id.to_recipient().unwrap()], None);
+    assert!(format::inspect_with_content_id(&sealed[..], 0).is_err());
+}
+
+#[test]
+fn rustcrypto_expanded_secret_types_zeroize_on_drop() {
+    fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    assert_zeroize_on_drop::<ml_kem::DecapsulationKey1024>();
+    assert_zeroize_on_drop::<ml_dsa::SigningKey<ml_dsa::MlDsa87>>();
+    assert_zeroize_on_drop::<ml_dsa::ExpandedSigningKey<ml_dsa::MlDsa87>>();
 }

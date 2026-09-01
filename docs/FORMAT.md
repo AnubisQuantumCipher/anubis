@@ -615,6 +615,30 @@ plaintext chunk to its output as soon as that chunk's tag verifies. It
 therefore may, on a truncated or tampered file, have already written every
 chunk preceding the damage.
 
+Here, **publish** means making plaintext observable outside a private staging
+boundary. A low-level streaming API MAY pass provisionally authenticated
+chunks to a caller-owned staging writer before the file-wide result is known,
+provided its contract explicitly requires the caller to discard that staging
+on error. Returning success is the publication receipt. Passing bytes to a
+private temporary writer under that contract is not publication; passing them
+to a destination path, standard output, a pipe consumer, or application state
+is publication.
+
+The reference Rust library makes the safe boundary the default:
+`decrypt` and `decrypt_unsized` stage plaintext in a private disk-backed file
+and do not call the supplied writer until the complete container succeeds.
+Its lower-level `decrypt_provisional` and `decrypt_unsized_provisional`
+functions expose the streaming behavior only to callers which already own an
+equivalent private staging boundary. Their names and API documentation carry
+the mandatory discard-on-error contract.
+
+The released `Decrypted`, `Inspection`, and `Verification` result shapes stay
+source-compatible. Callers that need the whole-container SHA-512 identity use
+the explicitly named `decrypt_report`, `decrypt_unsized_report`,
+`inspect_with_content_id`/`inspect_unsized`, and `verify_*_report` APIs. The
+report types make byte binding additive instead of silently changing an
+existing exhaustive Rust struct.
+
 This is a real property of any online AEAD and MUST be surfaced, not hidden:
 
 - When the output is a file, an implementation MUST NOT leave a partial
@@ -682,16 +706,16 @@ offers less.
 
 The scratch-file approach trades memory for **temporary disk space equal to the
 plaintext**. An implementation MUST degrade safely if that space is
-unavailable: the reference implementation falls back to holding the plaintext in
-memory, so the withholding guarantee is never weakened, only its space profile.
-Verified by pointing `TMPDIR` at an unwritable directory: output byte-identical.
+unavailable. The reference implementation fails closed before emitting any
+plaintext when it cannot create private disk-backed staging in `TMPDIR`; it
+never falls back to an input-controlled memory allocation.
 
 **Signed files.** The signature covers the payload ciphertext and sits at the
 end of the file (section 10), so it cannot be verified until every ciphertext
 byte has been read. A reader MUST complete signature verification before
-releasing *any* plaintext to its caller. It MUST NOT release plaintext first
-and check the signature afterwards, and MUST NOT silently treat the file as
-unsigned.
+publishing *any* plaintext outside its private staging boundary. It MUST NOT
+publish plaintext first and check the signature afterwards, and MUST NOT
+silently treat the file as unsigned.
 
 That does not require buffering the plaintext and does not require a seekable
 input. The trailer is a fixed 4627 bytes, so a reader consuming a non-seekable
@@ -871,23 +895,27 @@ the ordering IS normative:
 6. h = SHA-512 over header_bytes || payload region [header_len, size-4627)
 7. ML-DSA-87.Verify(verifying_key, h.finalize(), signature,
                     ctx = "anubis-v2-file")
-8. only then decrypt and emit payload chunks
+8. only then publish the decrypted payload outside private staging
 ```
 
-Step 4 precedes step 7, and both precede step 8. **A reader MUST NOT emit any
-plaintext before signature verification has succeeded.**
+Step 4 precedes step 7, and both precede step 8. A reader MAY decrypt into
+private staging while forming `h`, but **MUST NOT publish any plaintext outside
+private staging before signature verification has succeeded.**
 
 This does **not** require seeking, buffering the plaintext, or a second pass
 over the input. The trailer length is fixed at 4627 bytes, so a reader
 consuming a non-seekable stream can hold the trailing 4627 bytes back in a
 delay buffer while hashing and decrypting everything ahead of them, and find
 the signature waiting in that buffer at end of input. What it does require is
-that the plaintext produced during the pass not be released to the caller until
-step 7 succeeds: write it to a temporary and rename after verification, as
-section 9.1 describes. An implementation that will not implement the delay
-buffer MAY read the ciphertext twice, hashing on the first pass, or buffer the
-plaintext; one that can do none of these MUST refuse and say so rather than
-silently treating the file as unsigned.
+that the plaintext produced during the pass remain inside a private staging
+boundary until step 7 succeeds: write it to a temporary and rename after
+verification, as section 9.1 describes. A low-level API may instead write to a
+caller-owned staging sink when it names the output provisional and returns an
+explicit completion receipt; the caller then owns the same discard-on-error
+obligation. An implementation that will not implement the delay buffer MAY
+read the ciphertext twice, hashing on the first pass, or buffer the plaintext;
+one that can do none of these MUST refuse and say so rather than silently
+treating the file as unsigned.
 
 Verification succeeding proves that the holder of the signing key corresponding
 to `verifying_key` produced this exact file. It does not establish that the key
@@ -963,8 +991,8 @@ symmetric:
 
 | Artifact | Encoding | Payload | Length | Bech32 checksum guarantee |
 |---|---|---|---|---|
-| Recipient | Bech32, HRP `anubis` | 1600 B | 2573 chars | **degraded** (see 11.1) |
-| Identity | Bech32, HRP `ANUBIS-SECRET-KEY-` | 128 B | 230 chars | intact |
+| Recipient | Bech32m, HRP `anubis` | 1600 B | 2573 chars | **degraded** (see 11.1) |
+| Identity | Bech32m, HRP `ANUBIS-SECRET-KEY-` | 128 B | 230 chars | intact |
 | Verifying key | none; embedded in file | 2592 B | n/a | n/a |
 
 The ML-DSA-87 verifying key has **no standalone string encoding**. It is not
@@ -975,9 +1003,19 @@ and MUST NOT define a fourth encoding for it.
 
 ### 11.1 Bech32 profile
 
-Recipients and identities are Bech32 strings using the BIP-173 character set,
-generator polynomial, and checksum constant. This is `bech32`, not the BIP-350
-`bech32m` variant, and the constant is BIP-173's.
+Recipients and identities are canonically Bech32m strings: they use the
+BIP-173 character set and generator polynomial with the BIP-350 Bech32m
+checksum constant. Writers MUST emit Bech32m. This describes deployed ANUBIS
+keys and is the canonical form returned after decoding.
+
+An earlier revision of this document incorrectly named the BIP-173 Bech32
+checksum even though deployed ANUBIS releases emitted Bech32m. To avoid
+stranding keys produced independently from that document, readers SHOULD also
+accept the legacy Bech32 checksum for these two HRPs and payload lengths.
+Acceptance is one-way compatibility: after decoding either checksum variant,
+software MUST emit Bech32m when it serializes the key again. The payload and
+therefore its fingerprint are identical in both encodings; this compatibility
+rule does not create a second key identity.
 
 The BIP-173 90-character address limit is **not** applied; ANUBIS payloads are
 far larger than any Bitcoin address. Implementations MUST use a
@@ -986,7 +1024,7 @@ BCH code length limit of 1023 characters, and the two artifacts fall on
 opposite sides of it:
 
 - **Identity: codeword 211 characters (205 data + 6 checksum), inside 1023.**
-  The Bech32 guarantee of detecting any up to 4 substitution errors holds in
+  The checksum guarantee of detecting any up to 4 substitution errors holds in
   full. An identity is a hand-handleable token.
 - **Recipient: codeword 2566 characters (2560 data + 6 checksum), far outside
   1023.** Beyond 1023, the guaranteed error-detection property **does not
@@ -1000,12 +1038,20 @@ This asymmetry is the entire reason recipient fingerprints (section 11.4)
 exist. A recipient is a machine and clipboard artifact; the fingerprint is the
 human handle used to confirm it out of band.
 
-Bech32 forbids mixed case. Recipients are lowercase throughout; identities are
-uppercase throughout. A decoder MUST reject a mixed-case string; MUST reject a
-recipient whose HRP is not exactly `anubis`; MUST reject an identity whose HRP
-is not exactly `ANUBIS-SECRET-KEY-`; MUST reject any key string containing
-whitespace, since each key is a single unwrapped token; and MUST reject a
-string whose trailing bit padding is non-zero.
+Both accepted checksum profiles forbid mixed case, and readers MUST reject a
+mixed-case token. Canonical writers emit recipients entirely in lowercase and
+identities entirely in uppercase, with no surrounding or internal whitespace.
+A reader MAY remove surrounding whitespace for file and clipboard
+compatibility, but MUST reject whitespace remaining inside the token.
+
+A recipient reader MUST require the exact lowercase `anubis` HRP. An identity
+reader MUST accept both the canonical uppercase `ANUBIS-SECRET-KEY-` HRP and
+the otherwise all-lowercase form required by deployed compatibility; it MUST
+reject mixed case and every other HRP. After accepting a compatibility form --
+legacy Bech32 checksum, lowercase identity, or surrounding whitespace -- an
+implementation MUST serialize the key back to the canonical case, Bech32m
+checksum, and unwrapped token. A decoder MUST also reject a string whose
+trailing bit padding is non-zero.
 
 ### 11.2 Recipient
 

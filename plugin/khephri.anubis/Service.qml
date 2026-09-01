@@ -58,6 +58,12 @@ Item {
   readonly property bool engineMissing: engineProbed && enginePath === ""
   readonly property string installHint: Model.installHint()
 
+  // The child pipeline is capped by `head` one byte past this limit, so an
+  // oversized record is detectable without buffering arbitrary output in the
+  // long-lived shell process. `pipefail` also rejects a truncated multibyte
+  // record even when JavaScript's character count is smaller than its bytes.
+  readonly property int maxStatusOutputBytes: 4194304
+
   // ---- status --------------------------------------------------------------
   property var status: null
   property string statusError: ""
@@ -97,27 +103,45 @@ Item {
     if (statusProc.running) return
     statusProc.outText = ""
     statusProc.errText = ""
-    statusProc.command = [enginePath, "status", "--json"]
+    statusProc.command = [
+      "/usr/bin/timeout", "--signal=TERM", "15s",
+      "/usr/bin/bash", "-o", "pipefail", "-c",
+      "\"$1\" status --json | /usr/bin/head -c 4194305",
+      "anubis-status", enginePath
+    ]
     statusProc.running = true
   }
 
   function applyStatus(raw, stderrText, exitCode) {
     var parsed = null
+    var parsedCount = 0
+    var protocolValid = true
+    if (String(raw || "").length > maxStatusOutputBytes) {
+      status = null
+      statusError = "status output exceeded the safe readout limit"
+      statusAtMs = Date.now()
+      nowMs = statusAtMs
+      return
+    }
     var trimmed = String(raw || "").replace(/^\s+|\s+$/g, "")
     if (trimmed !== "") {
-      // `status` emits exactly one object, but a stray leading line from a
-      // future version must not take the whole read down.
       var lines = trimmed.split("\n")
-      for (var i = lines.length - 1; i >= 0 && parsed === null; i--) {
+      for (var i = 0; i < lines.length; i++) {
         var o = Model.parseLine(lines[i])
-        if (o && o.kind === "status") parsed = o
+        if (Model.validStatusRecord(o)) {
+          parsed = o
+          parsedCount += 1
+        } else protocolValid = false
       }
     }
-    if (parsed === null) {
+    if (exitCode !== 0 || !protocolValid || parsed === null
+        || parsedCount !== 1) {
       status = null
       statusError = stderrText !== "" ? stderrText
         : (exitCode === 127 ? "anubis could not execute"
-                            : "status produced no parsable payload")
+            : (exitCode === 124 ? "anubis status timed out"
+              : (exitCode !== 0 ? "anubis status exited " + exitCode
+                                : "status produced no complete payload")))
     } else {
       status = parsed
       statusError = ""
@@ -156,7 +180,8 @@ Item {
     // filename alone means the bar would silently drive the wrong tool and
     // report a dead vault with no cause. `--help` parses arguments and nothing
     // else: it reads no key and writes no file.
-    command: ["/usr/bin/env", "sh", "-c",
+    command: ["/usr/bin/timeout", "--signal=TERM", "15s",
+      "/usr/bin/env", "sh", "-c",
       "is_engine() { \"$1\" --help 2>/dev/null | "
       + "grep -qi 'post-quantum file encryption'; }; "
       + "for p in \"$HOME/.cargo/bin/anubis\" \"$HOME/.local/bin/anubis\" "
@@ -169,7 +194,9 @@ Item {
       onStreamFinished: probeProc.outText = String(text || "")
     }
     onExited: function (code) {
-      root.enginePath = probeProc.outText.replace(/^\s+|\s+$/g, "")
+      var candidate = probeProc.outText.replace(/^\s+|\s+$/g, "")
+      root.enginePath = code === 0
+        && candidate.length <= root.maxStatusOutputBytes ? candidate : ""
       root.engineProbed = true
       if (root.enginePath !== "") root.refresh()
       else {

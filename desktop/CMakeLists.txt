@@ -81,6 +81,30 @@ target_link_libraries(anubis-desktop PRIVATE
   Qt6::Svg
 )
 
+include(CTest)
+if(BUILD_TESTING)
+  find_package(Qt6 6.5 REQUIRED COMPONENTS QuickTest Test)
+  qt_add_executable(anubis-desktop-process-test
+    tests/process_lifecycle_test.cpp
+    src/datastream.cpp
+    src/datastream.hpp
+    src/process.cpp
+    src/process.hpp
+  )
+  target_include_directories(anubis-desktop-process-test PRIVATE src)
+  target_link_libraries(anubis-desktop-process-test PRIVATE
+    Qt6::Core
+    Qt6::Qml
+    Qt6::Test
+  )
+  add_test(NAME process-lifecycle COMMAND anubis-desktop-process-test)
+  add_test(NAME qml-model
+    COMMAND Qt6::qmltestrunner
+      -input ${CMAKE_CURRENT_SOURCE_DIR}/tests/qml)
+  set_tests_properties(qml-model PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 include(GNUInstallDirs)
 
 install(TARGETS anubis-desktop

@@ -102,6 +102,6 @@ pub fn save_recipients(map: &BTreeMap<String, String>) -> Result<()> {
     // Through the same atomic, symlink-refusing, 0600 helper as everything
     // else. The hand-rolled temporary this replaces sat at a fixed and fully
     // predictable path and was created without O_EXCL.
-    crate::io::write_atomic(&path, text.as_bytes())?;
+    crate::io::write_atomic(&path, text.as_bytes(), true)?;
     Ok(())
 }

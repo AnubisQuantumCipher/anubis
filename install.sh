@@ -56,7 +56,7 @@ fi
 step "Building ${BIN_NAME} (release)"
 
 # Build from the workspace root so the workspace Cargo.lock is honoured.
-( cd "${SRC_DIR}" && cargo build --release --all-features -p anubis-cli ) \
+( cd "${SRC_DIR}" && cargo build --release --locked --all-features -p anubis-cli ) \
     || die "cargo build failed"
 
 BUILT="${SRC_DIR}/target/release/${BIN_NAME}"

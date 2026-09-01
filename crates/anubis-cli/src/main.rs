@@ -83,6 +83,9 @@ enum Command {
         /// Implies --require-signature.
         #[arg(long, value_name = "FINGERPRINT")]
         signer: Option<String>,
+        /// Fail unless the decoded container has this exact SHA-512 content ID.
+        #[arg(long, value_name = "SHA512_HEX")]
+        expect_content_id: Option<ExpectedContentId>,
         input: PathBuf,
     },
     /// Show a file's header without decrypting it.
@@ -106,6 +109,38 @@ enum Command {
         /// bash, zsh, fish, elvish or powershell.
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Clone)]
+struct ExpectedContentId(format::ContentId);
+
+impl std::str::FromStr for ExpectedContentId {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.len() != 128 {
+            return Err("content ID must contain exactly 128 hexadecimal characters".into());
+        }
+
+        let mut decoded = [0u8; 64];
+        for (slot, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+            let high = hex_nibble(pair[0])
+                .ok_or_else(|| "content ID contains a non-hexadecimal character".to_string())?;
+            let low = hex_nibble(pair[1])
+                .ok_or_else(|| "content ID contains a non-hexadecimal character".to_string())?;
+            *slot = (high << 4) | low;
+        }
+        Ok(Self(decoded))
+    }
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[derive(Subcommand)]
@@ -140,7 +175,18 @@ impl std::fmt::Display for VerifyFailed {
 impl std::error::Error for VerifyFailed {}
 
 fn main() {
+    if let Err(error) = io::install_termination_handler() {
+        eprintln!("anubis: {error:#}");
+        std::process::exit(1);
+    }
     let cli = Cli::parse();
+    if let Err(e) = validate_stream_contract(&cli) {
+        // Payload stdout must stay a byte stream. In particular, do not emit
+        // the usual JSON error object here: that would turn a safely rejected
+        // command into a corrupt payload that happens to describe its error.
+        eprintln!("anubis: {e:#}");
+        std::process::exit(1);
+    }
     let json = cli.json;
     match run(&cli) {
         Ok(()) => {}
@@ -157,6 +203,29 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// Reject modes in which machine records and payload bytes would own the same
+/// stream. This is checked before opening input, resolving keys, or producing
+/// progress, so every rejection leaves payload stdout empty.
+fn validate_stream_contract(cli: &Cli) -> Result<()> {
+    if !cli.json {
+        return Ok(());
+    }
+
+    let payload_stdout = match &cli.command {
+        Command::Encrypt { input, output, .. } | Command::Decrypt { input, output, .. } => output
+            .as_deref()
+            .map_or_else(|| input == Path::new("-"), |path| path == Path::new("-")),
+        _ => false,
+    };
+
+    if payload_stdout {
+        bail!(
+            "--json cannot be combined with encrypt/decrypt payload output on stdout; use -o FILE for the payload or omit --json"
+        );
+    }
+    Ok(())
 }
 
 fn run(cli: &Cli) -> Result<()> {
@@ -188,6 +257,7 @@ fn run(cli: &Cli) -> Result<()> {
             force,
             require_signature,
             signer,
+            expect_content_id,
             input,
         } => cmd_decrypt(
             cli.json,
@@ -196,6 +266,7 @@ fn run(cli: &Cli) -> Result<()> {
             *force,
             *require_signature,
             signer.as_deref(),
+            expect_content_id.as_ref(),
             input,
         ),
         Command::Inspect { input } => cmd_inspect(cli.json, input),
@@ -231,7 +302,7 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
     let body = format!(
         "# ANUBIS identity: {name}\n# created: {created}\n# recipient: {rec_str}\n{encoded}\n"
     );
-    write_secret(&path, body.as_bytes())?;
+    write_secret(&path, body.as_bytes(), force)?;
 
     audit::append(&audit::Record {
         ts: created.clone(),
@@ -273,8 +344,8 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
 /// Creating at 0600 rather than writing then chmod-ing matters: the previous
 /// order left the private key on disk at the umask default for the duration
 /// of the write, which is world-readable on a typical system.
-fn write_secret(path: &Path, bytes: &[u8]) -> Result<()> {
-    io::write_atomic(path, bytes)
+fn write_secret(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
+    io::write_atomic(path, bytes, force)
 }
 
 // ------------------------------------------------------------------ helpers
@@ -478,9 +549,10 @@ fn cmd_encrypt(
                 );
             }
             // Armor cannot stream; build the container, then wrap it.
-            let mut raw = Vec::new();
+            let mut raw = io::CappedVec::new(CAP);
             let n = format::encrypt(&opts, &mut reader, &mut raw, |d| prog.tick(d))
                 .map_err(|e| anyhow!("{e}"))?;
+            let raw = raw.into_inner();
             let text = anubis_crypto::armor::encode(&raw);
             // Exact check against the SAME quantity decrypt measures. Checking
             // the plaintext length here instead would leave a band where
@@ -491,43 +563,32 @@ fn cmd_encrypt(
                     text.len()
                 );
             }
-            sink.write_all(text.as_bytes())?;
+            sink.write_all(text.as_bytes(), force)?;
             Ok(n)
         } else {
             match &sink {
                 io::Sink::File(p) => {
-                    // `create_secure_temp`, not `File::create`: the temporary
-                    // path is derived from the output name and is therefore
-                    // predictable, so it must be created with `create_new` --
-                    // which refuses to follow a symlink somebody planted there
-                    // -- and at 0600, so ciphertext is never briefly world
-                    // readable under a loose umask. Decrypt already does this;
-                    // this arm was the one write in the crate that did not.
-                    let (f, tmp) = io::create_secure_temp(p)?;
-                    let mut w = std::io::BufWriter::new(f);
+                    // The RAII temporary is created with `create_new` -- which
+                    // refuses to follow a planted symlink -- and at 0600, so
+                    // ciphertext is never briefly world-readable under a loose
+                    // umask. Its final commit rechecks the no-clobber policy
+                    // atomically rather than trusting the earlier guard.
+                    let tmp = io::NamedTemp::create_beside(p)?;
+                    let mut w = std::io::BufWriter::new(tmp);
                     let n = format::encrypt(&opts, &mut reader, &mut w, |d| prog.tick(d))
-                        .map_err(|e| anyhow!("{e}"));
-                    let n = match n {
-                        Ok(n) => n,
-                        Err(e) => {
-                            drop(w);
-                            let _ = std::fs::remove_file(&tmp);
-                            return Err(e);
-                        }
-                    };
+                        .map_err(|e| anyhow!("{e}"))?;
                     w.flush()?;
                     // Fail loudly if the bytes never reached the disk. A
                     // rename over unsynced data is how a full disk turns into
                     // a container that exists and cannot be decrypted.
-                    let f = w.into_inner().map_err(|e| anyhow!("{e}"))?;
-                    f.sync_all().context("syncing ciphertext")?;
-                    drop(f);
-                    std::fs::rename(&tmp, p)?;
+                    let tmp = w.into_inner().map_err(|e| anyhow!("{e}"))?;
+                    tmp.sync_all().context("syncing ciphertext")?;
+                    tmp.commit(p, force)?;
                     Ok(n)
                 }
                 io::Sink::Stdout => {
                     let stdout = std::io::stdout();
-                    let mut w = std::io::BufWriter::new(stdout.lock());
+                    let mut w = std::io::BufWriter::new(io::CancelWriter::new(stdout.lock()));
                     let n = format::encrypt(&opts, &mut reader, &mut w, |d| prog.tick(d))
                         .map_err(|e| anyhow!("{e}"))?;
                     w.flush()?;
@@ -560,6 +621,7 @@ fn cmd_decrypt(
     force: bool,
     require_signature: bool,
     signer_pin: Option<&str>,
+    expected_content_id: Option<&ExpectedContentId>,
     input: &Path,
 ) -> Result<()> {
     let started = Instant::now();
@@ -582,6 +644,7 @@ fn cmd_decrypt(
 
     let mut signed = false;
     let mut signer_fp: Option<String> = None;
+    let mut content_id: Option<format::ContentId> = None;
     let result = (|| -> Result<u64> {
         sink.guard(force)?;
 
@@ -614,57 +677,50 @@ fn cmd_decrypt(
         // policy passes. Buffering the plaintext in memory would gate
         // publication just as well but costs the whole file in RAM, which is
         // unacceptable for a tool expected to handle large archives.
-        // Stdout is the one case that must buffer: bytes cannot be recalled.
+        // Stdout uses an unlinked disk spill because bytes cannot be recalled.
         enum Out {
-            Temp(std::io::BufWriter<std::fs::File>, PathBuf),
+            Temp(std::io::BufWriter<io::NamedTemp>),
             /// An unlinked spill file for stdout. Constant memory, and it
             /// still gates publication, because nothing reaches stdout until
             /// the whole container has verified.
             Spill(std::io::BufWriter<std::fs::File>),
-            Mem(Vec<u8>),
         }
-        let mut out = match &sink {
-            io::Sink::File(p) => {
-                let (f, tmp) = io::create_secure_temp(p)?;
-                Out::Temp(std::io::BufWriter::new(f), tmp)
-            }
-            io::Sink::Stdout => match io::spill_file() {
-                Ok(f) => Out::Spill(std::io::BufWriter::new(f)),
-                // No writable temp directory: fall back to memory rather than
-                // refuse. Correctness is identical; only the footprint differs.
-                Err(_) => Out::Mem(Vec::new()),
-            },
-        };
+        let mut out =
+            match &sink {
+                io::Sink::File(p) => {
+                    let tmp = io::NamedTemp::create_beside(p)?;
+                    Out::Temp(std::io::BufWriter::new(tmp))
+                }
+                io::Sink::Stdout => Out::Spill(std::io::BufWriter::new(io::spill_file().context(
+                    "creating private disk-backed staging for plaintext output on stdout",
+                )?)),
+            };
 
         let dec = {
             let mut w: &mut dyn Write = match &mut out {
-                Out::Temp(f, _) => f,
+                Out::Temp(f) => f,
                 Out::Spill(f) => f,
-                Out::Mem(v) => v,
             };
             let r = if armored {
                 let raw = read_armored(head, &mut reader)?;
                 let len = raw.len() as u64;
-                format::decrypt(&ids, &raw[..], len, &mut w, |d| prog.tick(d))
+                format::decrypt_provisional(&ids, &raw[..], len, &mut w, |d| prog.tick(d))
             } else {
                 let joined = head.chain(reader);
                 match src.len() {
-                    Some(len) => format::decrypt(&ids, joined, len, &mut w, |d| prog.tick(d)),
-                    None => format::decrypt_unsized(&ids, joined, &mut w, |d| prog.tick(d)),
+                    Some(len) => {
+                        format::decrypt_provisional(&ids, joined, len, &mut w, |d| prog.tick(d))
+                    }
+                    None => format::decrypt_unsized_provisional(&ids, joined, &mut w, |d| {
+                        prog.tick(d);
+                    }),
                 }
             };
-            match r {
-                Ok(d) => d,
-                Err(e) => {
-                    if let Out::Temp(_, tmp) = &out {
-                        let _ = std::fs::remove_file(tmp);
-                    }
-                    return Err(anyhow!("{e}"));
-                }
-            }
+            r.map_err(|e| anyhow!("{e}"))?
         };
 
         signed = dec.verified_key.is_some();
+        content_id = Some(dec.content_id);
         signer_fp = dec
             .verified_key
             .as_ref()
@@ -674,6 +730,22 @@ fn cmd_decrypt(
         // A valid signature by an unknown key is not the same as a signature
         // by the key you expected, so --signer pins the specific signer.
         let policy = (|| -> Result<()> {
+            if let Some(want) = expected_content_id {
+                let got = content_id
+                    .as_ref()
+                    .expect("successful decryption always has a content ID");
+                let equal = bool::from(<[u8] as subtle::ConstantTimeEq>::ct_eq(
+                    got.as_slice(),
+                    want.0.as_slice(),
+                ));
+                if !equal {
+                    bail!(
+                        "container content ID {} does not match expected {}",
+                        content_id_hex(got),
+                        content_id_hex(&want.0)
+                    );
+                }
+            }
             if (require_signature || signer_pin.is_some()) && !signed {
                 bail!(
                     "container is unsigned and a signature was required \
@@ -700,16 +772,16 @@ fn cmd_decrypt(
         })();
 
         match out {
-            Out::Temp(mut f, tmp) => {
+            Out::Temp(mut f) => {
                 f.flush()?;
-                drop(f);
-                if let Err(e) = policy {
-                    // Never publish plaintext that failed policy.
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(e);
-                }
+                // Never publish plaintext that failed policy. NamedTemp's
+                // destructor removes the sidecar on this and every other
+                // error path.
+                policy?;
                 if let io::Sink::File(p) = &sink {
-                    std::fs::rename(&tmp, p)?;
+                    let tmp = f.into_inner().map_err(|e| anyhow!("{e}"))?;
+                    tmp.sync_all().context("syncing plaintext")?;
+                    tmp.commit(p, force)?;
                 }
             }
             Out::Spill(mut f) => {
@@ -718,14 +790,11 @@ fn cmd_decrypt(
                 // The spill file is already unlinked, so failing here leaves
                 // nothing behind and emits nothing.
                 policy?;
+                io::check_cancelled()?;
                 f.rewind()?;
-                let mut stdout = std::io::stdout().lock();
+                let mut stdout = io::CancelWriter::new(std::io::stdout().lock());
                 std::io::copy(&mut f, &mut stdout)?;
                 stdout.flush()?;
-            }
-            Out::Mem(v) => {
-                policy?;
-                sink.write_all(&v)?;
             }
         }
         Ok(dec.bytes)
@@ -739,6 +808,7 @@ fn cmd_decrypt(
         Some(&sink.label()),
         signed,
         signer_fp.as_deref(),
+        content_id.as_ref(),
         0,
         ms,
         result,
@@ -776,6 +846,15 @@ fn fill<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<usize> {
     Ok(n)
 }
 
+fn content_id_hex(content_id: &format::ContentId) -> String {
+    let mut encoded = String::with_capacity(content_id.len().saturating_mul(2));
+    for byte in content_id {
+        std::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_result(
     json: bool,
@@ -787,7 +866,9 @@ fn emit_result(
     ms: u64,
     result: Result<u64>,
 ) -> Result<()> {
-    emit_result_signed(json, op, input, out, signed, None, recipients, ms, result)
+    emit_result_signed(
+        json, op, input, out, signed, None, None, recipients, ms, result,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -798,6 +879,7 @@ fn emit_result_signed(
     out: Option<&String>,
     signed: bool,
     signer: Option<&str>,
+    content_id: Option<&format::ContentId>,
     recipients: usize,
     ms: u64,
     result: Result<u64>,
@@ -834,6 +916,7 @@ fn emit_result_signed(
                     "out":out,
                     "bytes":bytes,"ms":ms,"signed":signed,
                     "signer_fingerprint":signer,
+                    "content_id":content_id.map(content_id_hex),
                     "recipients":recipients,"error":null,
                     // A successful decrypt means the header MAC verified;
                     // reaching this point is only possible after that check.
@@ -906,26 +989,20 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
     let n = fill(&mut reader, &mut probe)?;
     let head = &probe[..n];
 
-    let info = if anubis_crypto::armor::looks_armored(head) {
-        let raw = read_armored(head, &mut reader)?;
-        let len = raw.len() as u64;
-        format::inspect(&raw[..], len).map_err(|e| anyhow!("{e}"))?
-    } else {
-        let joined = head.chain(reader);
-        match src.len() {
-            Some(len) => format::inspect(joined, len).map_err(|e| anyhow!("{e}"))?,
-            None => {
-                // A pipe has no length; buffer to learn it.
-                let mut all = Vec::new();
-                let mut j = joined;
-                j.read_to_end(&mut all)?;
-                let len = all.len() as u64;
-                format::inspect(&all[..], len).map_err(|e| anyhow!("{e}"))?
-            }
-        }
-    };
-
     if json {
+        let info = if anubis_crypto::armor::looks_armored(head) {
+            let raw = read_armored(head, &mut reader)?;
+            let len = raw.len() as u64;
+            format::inspect_with_content_id(&raw[..], len).map_err(|e| anyhow!("{e}"))?
+        } else {
+            let joined = head.chain(reader);
+            match src.len() {
+                Some(len) => {
+                    format::inspect_with_content_id(joined, len).map_err(|e| anyhow!("{e}"))?
+                }
+                None => format::inspect_unsized(joined).map_err(|e| anyhow!("{e}"))?,
+            }
+        };
         println!(
             "{}",
             json!({
@@ -937,36 +1014,48 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
                 "signed": info.signed,
                 "signer_fingerprint": info.verifying_key.as_ref()
                     .map(|k| anubis_crypto::keys::fingerprint(k)),
+                "content_id": content_id_hex(&info.content_id),
                 "header_bytes": info.header_bytes,
                 "payload_bytes": info.payload_bytes,
                 "chunks": info.chunks,
                 "header_mac_ok": null,
-                // Present but unchecked. Verifying costs a pass over the whole
-                // payload, which `inspect` deliberately does not do -- run
-                // `anubis verify` for an answer. Reporting null rather than
-                // omitting the field keeps "not checked here" distinguishable
-                // from "checked and passed".
+                // Present but unchecked. JSON inspection reads the whole
+                // payload to bind content_id, but deliberately does not perform
+                // ML-DSA verification -- run `anubis verify` for that answer.
+                // Null keeps "not checked here" distinct from "checked and passed".
                 "signature_ok": null,
             })
         );
+        return Ok(());
+    }
+
+    let info = if anubis_crypto::armor::looks_armored(head) {
+        let raw = read_armored(head, &mut reader)?;
+        let len = raw.len() as u64;
+        format::inspect(&raw[..], len).map_err(|e| anyhow!("{e}"))?
     } else {
-        println!("format:      {}", info.format);
-        println!("recipients:  {}", info.recipients);
-        println!("signed:      {}", info.signed);
-        if let Some(k) = &info.verifying_key {
-            println!("signer:      {}", anubis_crypto::keys::fingerprint(k));
+        let joined = head.chain(reader);
+        match src.len() {
+            Some(len) => format::inspect(joined, len).map_err(|e| anyhow!("{e}"))?,
+            None => format::inspect_unsized(joined)
+                .map(Into::into)
+                .map_err(|e| anyhow!("{e}"))?,
         }
-        println!("header:      {} bytes", info.header_bytes);
-        println!(
-            "payload:     {} bytes in {} chunks",
-            info.payload_bytes, info.chunks
-        );
-        println!("\nHeader authenticity is only verifiable with a key; run decrypt to check it.");
-        if info.signed {
-            println!(
-                "The signature is present but NOT checked here; run `anubis verify` to check it."
-            );
-        }
+    };
+    println!("format:      {}", info.format);
+    println!("recipients:  {}", info.recipients);
+    println!("signed:      {}", info.signed);
+    if let Some(k) = &info.verifying_key {
+        println!("signer:      {}", anubis_crypto::keys::fingerprint(k));
+    }
+    println!("header:      {} bytes", info.header_bytes);
+    println!(
+        "payload:     {} bytes in {} chunks",
+        info.payload_bytes, info.chunks
+    );
+    println!("\nHeader authenticity is only verifiable with a key; run decrypt to check it.");
+    if info.signed {
+        println!("The signature is present but NOT checked here; run `anubis verify` to check it.");
     }
     Ok(())
 }
@@ -1016,30 +1105,27 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
     let info = if anubis_crypto::armor::looks_armored(head) {
         let raw = read_armored(head, &mut reader)?;
         let len = raw.len() as u64;
-        format::verify(&raw[..], len)
+        format::verify_report(&raw[..], len)
     } else {
         let joined = head.chain(reader);
         match src.len() {
-            Some(len) => format::verify(joined, len),
+            Some(len) => format::verify_report(joined, len),
             // A pipe has no length. Stream it through the delay buffer rather
             // than reading it into memory: this command is pointed at
             // containers from strangers, and "buffer whatever arrives" is an
             // unauthenticated memory-exhaustion invitation on exactly the
             // input that deserves it least.
-            None => format::verify_unsized(joined),
+            None => format::verify_unsized_report(joined),
         }
     };
 
     let info = match info {
         Ok(info) => info,
         Err(e) => {
-            // Only a genuine signature mismatch may be reported as
-            // `signature_ok: false`. Every other failure -- a truncated file, a
-            // malformed header, an unreadable trailer -- means the check could
-            // not be MADE, which is `null`. Collapsing the two would let a
-            // damaged file be reported as a forged one, and would tell a reader
-            // something about the signer that nothing established.
-            let mismatch = matches!(e, anubis_crypto::Error::BadSignature);
+            // Cryptographic mismatches are returned as bound reports above.
+            // Reaching this branch means the check could not be made at all:
+            // malformed or structurally truncated input has no signer/content
+            // verdict, and must remain null rather than being called invalid.
             if json {
                 // The verify record IS this command's result record; main must
                 // not print a second one after it. A consumer parsing stdout
@@ -1051,10 +1137,18 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
                         "kind": "verify",
                         "path": src.label(),
                         "ok": false,
-                        // Reaching a signature mismatch at all proves a
-                        // verifying key was present, so `signed` is known here.
-                        "signed": if mismatch { Some(true) } else { None },
-                        "signature_ok": if mismatch { Some(false) } else { None },
+                        "format": null,
+                        "signed": null,
+                        "signature_ok": null,
+                        "signer_fingerprint": null,
+                        "content_id": null,
+                        "signer_pinned": want_signer,
+                        "signer_matches": null,
+                        "recipients": null,
+                        "header_bytes": null,
+                        "payload_bytes": null,
+                        "chunks": null,
+                        "header_mac_ok": null,
                         "error": e.to_string(),
                     })
                 );
@@ -1078,6 +1172,15 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
     };
 
     let ok = info.signature_ok == Some(true) && pin_ok;
+    let verdict_error = if info.signature_ok == Some(false) {
+        Some("signature verification failed")
+    } else if !info.signed {
+        Some("container is not signed")
+    } else if !pin_ok {
+        Some("signature signer does not match pinned signer")
+    } else {
+        None
+    };
 
     if json {
         println!(
@@ -1090,12 +1193,14 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
                 "signed": info.signed,
                 "signature_ok": info.signature_ok,
                 "signer_fingerprint": fp,
+                "content_id": content_id_hex(&info.content_id),
                 "signer_pinned": want_signer,
                 "signer_matches": want_signer.map(|_| pin_ok),
                 "recipients": info.recipients,
                 "header_bytes": info.header_bytes,
                 "payload_bytes": info.payload_bytes,
                 "chunks": info.chunks,
+                "error": verdict_error,
                 // The header MAC is keyed from the file key, so this command
                 // -- which holds no key -- structurally cannot check it.
                 "header_mac_ok": null,
@@ -1106,6 +1211,15 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
         println!("\nThis container carries no signature. That is not the same as");
         println!("unsigned-by-the-sender: any recipient can strip a signature, so");
         println!("absence carries no information. Require one up front instead.");
+    } else if info.signature_ok == Some(false) {
+        println!("signature:   INVALID (ML-DSA-87)");
+        println!("signer:      {}", fp.as_deref().unwrap_or("--"));
+        println!(
+            "payload:     {} bytes in {} chunks",
+            info.payload_bytes, info.chunks
+        );
+        println!("\nThe container bytes and embedded signer are identified, but the");
+        println!("signature does not authenticate those bytes.");
     } else {
         println!("signature:   VALID (ML-DSA-87)");
         println!("signer:      {}", fp.as_deref().unwrap_or("--"));
@@ -1135,6 +1249,9 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
     if !info.signed {
         return Err(VerifyFailed(anyhow!("container is not signed")).into());
     }
+    if info.signature_ok == Some(false) {
+        return Err(VerifyFailed(anyhow!("signature did not verify")).into());
+    }
     if !pin_ok {
         return Err(VerifyFailed(anyhow!(
             "signature is valid but by {}, not the pinned signer",
@@ -1142,7 +1259,7 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
         ))
         .into());
     }
-    Err(VerifyFailed(anyhow!("signature did not verify")).into())
+    Err(VerifyFailed(anyhow!("signature verification produced no verdict")).into())
 }
 
 // ------------------------------------------------------------------ status

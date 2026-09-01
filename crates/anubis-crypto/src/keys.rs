@@ -104,7 +104,8 @@ impl Recipient {
         })
     }
 
-    /// Encode as `anubis1...`.
+    /// Encode in canonical lowercase Bech32m as `anubis1...` with no
+    /// surrounding whitespace.
     pub fn encode(&self) -> Result<String> {
         let hrp = Hrp::parse(HRP_RECIPIENT).map_err(|e| Error::Key(format!("bad hrp: {e}")))?;
         bech32::encode_lower::<Bech32mUnlimited>(hrp, &self.to_payload())
@@ -112,8 +113,13 @@ impl Recipient {
     }
 
     /// Decode from `anubis1...`.
+    ///
+    /// Surrounding copy/paste whitespace is ignored. The recipient HRP and
+    /// token remain lowercase-only, and re-encoding always returns canonical
+    /// lowercase Bech32m even when the accepted input used the legacy Bech32
+    /// checksum.
     pub fn decode(s: &str) -> Result<Self> {
-        let (hrp, data) = crate::b32::decode(s.trim())
+        let (hrp, data) = crate::b32::decode_key(s.trim())
             .map_err(|e| Error::Key(format!("bech32 decode failed: {e}")))?;
         if hrp.as_str() != HRP_RECIPIENT {
             return Err(Error::Key(format!(
@@ -222,7 +228,8 @@ impl Identity {
         out
     }
 
-    /// Encode as `ANUBIS-SECRET-KEY-1...`.
+    /// Encode in canonical uppercase Bech32m as `ANUBIS-SECRET-KEY-1...`
+    /// with no surrounding whitespace.
     ///
     /// The intermediate payload is wiped: an identity is 128 bytes of pure
     /// secret and every keygen and key load would otherwise leave a copy in
@@ -235,8 +242,13 @@ impl Identity {
     }
 
     /// Decode from `ANUBIS-SECRET-KEY-1...`.
+    ///
+    /// Surrounding copy/paste whitespace is ignored. For compatibility an
+    /// otherwise all-lowercase identity and the legacy Bech32 checksum are
+    /// accepted; mixed case is rejected by the checksum parser. Re-encoding
+    /// always returns canonical uppercase Bech32m.
     pub fn decode(s: &str) -> Result<Self> {
-        let (hrp, data) = crate::b32::decode(s.trim())
+        let (hrp, data) = crate::b32::decode_key(s.trim())
             .map_err(|e| Error::Key(format!("bech32 decode failed: {e}")))?;
         let data = Zeroizing::new(data);
         if !hrp.as_str().eq_ignore_ascii_case(HRP_IDENTITY) {

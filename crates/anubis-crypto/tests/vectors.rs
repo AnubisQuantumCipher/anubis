@@ -6,6 +6,7 @@
 use anubis_crypto::format::{self, EncryptOptions};
 use anubis_crypto::keys::{Identity, Recipient, fingerprint};
 use anubis_crypto::stream::CHUNK;
+use bech32::Fe32IterExt;
 
 fn seal(data: &[u8], recipients: &[Recipient], signer: Option<&Identity>) -> Vec<u8> {
     let mut out = Vec::new();
@@ -187,6 +188,86 @@ fn keys_round_trip_through_bech32() {
     let rback = Recipient::decode(&renc).unwrap();
     assert_eq!(rback.to_payload(), r.to_payload());
     assert_eq!(rback.fingerprint(), r.fingerprint());
+}
+
+#[test]
+fn legacy_bech32_keys_decode_but_reencode_canonically_as_bech32m() {
+    let id = Identity::generate().unwrap();
+
+    let identity_hrp = bech32::Hrp::parse("ANUBIS-SECRET-KEY-").unwrap();
+    let legacy_identity =
+        bech32::encode_upper::<anubis_crypto::b32::Bech32Unlimited>(identity_hrp, &id.to_payload())
+            .unwrap();
+    let canonical_identity = id.encode().unwrap();
+    assert_ne!(legacy_identity, canonical_identity);
+    assert_eq!(
+        Identity::decode(&legacy_identity)
+            .unwrap()
+            .encode()
+            .unwrap(),
+        canonical_identity
+    );
+
+    let recipient = id.to_recipient().unwrap();
+    let recipient_hrp = bech32::Hrp::parse("anubis").unwrap();
+    let legacy_recipient = bech32::encode_lower::<anubis_crypto::b32::Bech32Unlimited>(
+        recipient_hrp,
+        &recipient.to_payload(),
+    )
+    .unwrap();
+    let canonical_recipient = recipient.encode().unwrap();
+    assert_ne!(legacy_recipient, canonical_recipient);
+    assert_eq!(
+        Recipient::decode(&legacy_recipient)
+            .unwrap()
+            .encode()
+            .unwrap(),
+        canonical_recipient
+    );
+}
+
+#[test]
+fn identity_rejects_a_checksumming_alias_with_nonzero_padding() {
+    let id = Identity::generate().unwrap();
+    let canonical = id.encode().unwrap();
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<
+        anubis_crypto::b32::Bech32mUnlimited,
+    >(&canonical)
+    .unwrap();
+    let hrp = parsed.hrp();
+    let mut symbols: Vec<bech32::Fe32> = parsed.fe32_iter().collect();
+    let final_symbol = symbols.last_mut().expect("identity data symbol");
+    assert_eq!(final_symbol.to_u8() & 1, 0, "canonical padding bit");
+    *final_symbol = bech32::Fe32::try_from(final_symbol.to_u8() | 1).unwrap();
+
+    // Recompute a fully valid Bech32m checksum over the non-canonical symbol
+    // stream. A decoder which only verifies the checksum and then drops the
+    // leftover bit sees the same identity payload and incorrectly accepts an
+    // alternate string for the same secret.
+    let alias: String = symbols
+        .into_iter()
+        .with_checksum::<anubis_crypto::b32::Bech32mUnlimited>(&hrp)
+        .chars()
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    let alias_parsed = bech32::primitives::decode::CheckedHrpstring::new::<
+        anubis_crypto::b32::Bech32mUnlimited,
+    >(&alias)
+    .expect("alias checksum must be valid");
+    assert_eq!(
+        alias_parsed.byte_iter().collect::<Vec<_>>(),
+        id.to_payload(),
+        "the alias must decode to the same bytes before padding validation"
+    );
+    assert!(
+        anubis_crypto::b32::decode(&alias).is_err(),
+        "the public low-level decoder must also reject the alias"
+    );
+    let error = Identity::decode(&alias).unwrap_err();
+    assert!(
+        error.to_string().contains("padding"),
+        "nonzero padding produced the wrong error: {error}"
+    );
 }
 
 #[test]

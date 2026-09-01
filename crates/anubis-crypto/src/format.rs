@@ -26,7 +26,9 @@ use hmac::{Hmac, Mac};
 use hybrid_array::Array;
 use ml_dsa::{MlDsa87, Signature, VerifyingKey};
 use sha2::{Digest, Sha512};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Seek, SeekFrom};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -59,6 +61,16 @@ pub const WRAPPED_LEN: usize = FILE_KEY_LEN + 16;
 pub const SIG_LEN: usize = 4627;
 /// Signing domain separator, passed as the ML-DSA context string.
 pub const SIG_CONTEXT: &[u8] = b"anubis-v2-file";
+
+/// SHA-512 digest of the complete decoded binary container.
+///
+/// This covers the exact header, STREAM payload ciphertext, and signature
+/// trailer when present. Transport armor is deliberately outside the digest.
+pub type ContentId = [u8; 64];
+
+fn finish_content_id(hasher: Sha512) -> ContentId {
+    hasher.finalize().into()
+}
 
 type HmacSha512 = Hmac<Sha512>;
 
@@ -250,6 +262,11 @@ impl Header {
 
             match parts.first().copied() {
                 Some(STANZA_HYBRID) => {
+                    if verifying_key.is_some() {
+                        return Err(Error::Header(
+                            "recipient stanza follows mldsa87 stanza".into(),
+                        ));
+                    }
                     if parts.len() != 3 {
                         return Err(Error::Header(
                             "hybrid stanza needs exactly two arguments".into(),
@@ -388,6 +405,11 @@ where
     if opts.recipients.is_empty() {
         return Err(Error::Key("at least one recipient is required".into()));
     }
+    if opts.recipients.len() > MAX_STANZAS {
+        return Err(Error::Key(format!(
+            "more than {MAX_STANZAS} recipients requested"
+        )));
+    }
 
     let mut file_key = [0u8; FILE_KEY_LEN];
     getrandom::fill(&mut file_key)
@@ -474,6 +496,27 @@ pub struct Decrypted {
     pub verified_key: Option<Vec<u8>>,
 }
 
+/// Content-bound outcome of a successful decryption.
+///
+/// This is returned by the explicitly named report and provisional APIs. The
+/// released [`Decrypted`] shape remains unchanged for source compatibility.
+pub struct DecryptionReport {
+    pub bytes: u64,
+    /// Present when the file carried a signature that verified.
+    pub verified_key: Option<Vec<u8>>,
+    /// SHA-512 over the complete decoded binary container.
+    pub content_id: ContentId,
+}
+
+impl From<DecryptionReport> for Decrypted {
+    fn from(report: DecryptionReport) -> Self {
+        Self {
+            bytes: report.bytes,
+            verified_key: report.verified_key,
+        }
+    }
+}
+
 /// Size of the payload region, given the whole container and its overhead.
 ///
 /// Split out so it can be proved rather than transcribed: `header_len` is
@@ -489,6 +532,21 @@ fn payload_span(total: u64, header_len: u64, sig_len: u64) -> Result<u64> {
         .ok_or_else(|| Error::Integrity("file is truncated".into()))
 }
 
+/// Require the sized API's declared container boundary to be the real EOF.
+///
+/// `BufReader` may already have read beyond the declared payload into its
+/// internal buffer, so this must inspect the buffered view rather than the
+/// underlying reader directly.
+fn require_eof<R: BufRead>(reader: &mut R) -> Result<()> {
+    if reader.fill_buf()?.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Integrity(
+            "trailing bytes after the declared container length".into(),
+        ))
+    }
+}
+
 /// How much input is available behind the reader.
 enum Bound {
     /// Exact byte length of the whole container.
@@ -498,16 +556,18 @@ enum Bound {
     Unknown,
 }
 
-/// Decrypt `reader` (whose total length is `total_len`) into `writer`.
+/// Decrypt `reader` (whose total length is `total_len`) into `writer`,
+/// withholding plaintext until the complete container has authenticated.
 ///
-/// # Partial output on error
+/// Plaintext is staged in a private, disk-backed temporary and copied to
+/// `writer` only after payload authentication, signature verification, and
+/// all container checks succeed. An integrity or signature failure therefore
+/// writes zero bytes to the caller's writer while memory usage stays bounded.
 ///
-/// Decryption is streaming, so on `Err` the writer MAY already have received
-/// a prefix of the plaintext, or all of it. Every byte written was covered by
-/// a verified chunk tag, so nothing unauthenticated is ever emitted, but the
-/// output is incomplete and MUST NOT be published. Callers are expected to
-/// write to a temporary and discard it unless this returns `Ok`; the `anubis`
-/// CLI does exactly that.
+/// A failure from the caller's `writer` while publishing already-verified
+/// plaintext can still leave a partial write at that external sink. Callers
+/// that need atomic destination-file publication must still provide their own
+/// atomic file sink.
 pub fn decrypt<R, W, F>(
     identities: &[Identity],
     reader: R,
@@ -515,6 +575,52 @@ pub fn decrypt<R, W, F>(
     writer: &mut W,
     progress: F,
 ) -> Result<Decrypted>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(u64),
+{
+    decrypt_report(identities, reader, total_len, writer, progress).map(Into::into)
+}
+
+/// Content-bound counterpart to [`decrypt`].
+///
+/// Plaintext has the same fail-closed publication contract as [`decrypt`],
+/// and the report additionally binds the result to the complete container.
+pub fn decrypt_report<R, W, F>(
+    identities: &[Identity],
+    reader: R,
+    total_len: u64,
+    writer: &mut W,
+    progress: F,
+) -> Result<DecryptionReport>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(u64),
+{
+    let mut stage = PlaintextStage::create()?;
+    let decrypted = decrypt_provisional(identities, reader, total_len, &mut stage, progress)?;
+    stage.copy_to(writer)?;
+    Ok(decrypted)
+}
+
+/// Decrypt into caller-owned private staging.
+///
+/// This is the constant-memory primitive used by callers which already own a
+/// secure publication boundary. On `Err`, `writer` MAY contain a verified
+/// plaintext prefix or the complete plaintext; a signed container's
+/// file-wide signature is checked only after the payload. The caller MUST
+/// discard the staging sink unless this returns `Ok(DecryptionReport)` and
+/// MUST NOT pass a destination path, standard output, pipe, or
+/// application-visible buffer directly.
+pub fn decrypt_provisional<R, W, F>(
+    identities: &[Identity],
+    reader: R,
+    total_len: u64,
+    writer: &mut W,
+    progress: F,
+) -> Result<DecryptionReport>
 where
     R: Read,
     W: Write,
@@ -529,13 +635,12 @@ where
     )
 }
 
-/// Decrypt from a stream of unknown length, such as stdin.
+/// Decrypt from a stream of unknown length, withholding plaintext until the
+/// complete container has authenticated.
 ///
-/// Carries the same partial-output-on-error contract as [`decrypt`].
-///
-/// Unsigned containers stream straight through. Signed containers are
-/// buffered in memory, because the 4627-byte signature trailer can only be
-/// separated from the payload once the end of input is known.
+/// Carries the same zero-caller-output-on-integrity-error contract as
+/// [`decrypt`]. Both the input processing and disk-backed plaintext staging
+/// use bounded memory.
 pub fn decrypt_unsized<R, W, F>(
     identities: &[Identity],
     reader: R,
@@ -547,7 +652,79 @@ where
     W: Write,
     F: FnMut(u64),
 {
+    decrypt_unsized_report(identities, reader, writer, progress).map(Into::into)
+}
+
+/// Content-bound counterpart to [`decrypt_unsized`].
+pub fn decrypt_unsized_report<R, W, F>(
+    identities: &[Identity],
+    reader: R,
+    writer: &mut W,
+    progress: F,
+) -> Result<DecryptionReport>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(u64),
+{
+    let mut stage = PlaintextStage::create()?;
+    let decrypted = decrypt_unsized_provisional(identities, reader, &mut stage, progress)?;
+    stage.copy_to(writer)?;
+    Ok(decrypted)
+}
+
+/// Provisional-output counterpart to [`decrypt_unsized`].
+///
+/// Unsigned containers stream straight through. Signed containers use a
+/// fixed-size delay window to separate the signature trailer from the
+/// payload without buffering the container. As with [`decrypt_provisional`],
+/// the caller MUST keep `writer` private and discard it on `Err`.
+pub fn decrypt_unsized_provisional<R, W, F>(
+    identities: &[Identity],
+    reader: R,
+    writer: &mut W,
+    progress: F,
+) -> Result<DecryptionReport>
+where
+    R: Read,
+    W: Write,
+    F: FnMut(u64),
+{
     decrypt_impl(identities, reader, Bound::Unknown, writer, progress)
+}
+
+/// Private disk-backed plaintext staging for the safe decrypt APIs.
+///
+/// The platform temp primitive is anonymous/unlinked (Unix) or opened with
+/// delete-on-close and no sharing (Windows). It remains handle-only for its
+/// lifetime instead of exposing a reusable plaintext path.
+struct PlaintextStage {
+    file: File,
+}
+
+impl PlaintextStage {
+    fn create() -> Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+        })
+    }
+
+    fn copy_to<W: Write>(&mut self, writer: &mut W) -> Result<()> {
+        self.file.flush()?;
+        self.file.seek(SeekFrom::Start(0))?;
+        std::io::copy(&mut self.file, writer)?;
+        Ok(())
+    }
+}
+
+impl Write for PlaintextStage {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 fn decrypt_impl<R, W, F>(
@@ -556,7 +733,7 @@ fn decrypt_impl<R, W, F>(
     bound: Bound,
     writer: &mut W,
     progress: F,
-) -> Result<Decrypted>
+) -> Result<DecryptionReport>
 where
     R: Read,
     W: Write,
@@ -572,6 +749,9 @@ where
         Bound::Known(total) => Some(payload_span(total, header_len, sig_len)?),
         Bound::Unknown => None,
     };
+    if let Some(payload_len) = payload_len {
+        stream::payload_geometry(payload_len)?;
+    }
 
     // Recover the file key. A stanza that fails to decapsulate is skipped,
     // never fatal: one malformed stanza must not deny access to a file the
@@ -606,8 +786,10 @@ where
         ));
     }
 
-    let mut hasher = Sha512::new();
-    hasher.update(&header.raw);
+    let mut signature_hasher = Sha512::new();
+    signature_hasher.update(&header.raw);
+    let mut content_hasher = Sha512::new();
+    content_hasher.update(&header.raw);
 
     let pk = Zeroizing::new(payload_key(&file_key));
     file_key.zeroize();
@@ -615,9 +797,10 @@ where
     // Split payload from trailer.
     let (total, sig_bytes) = match (payload_len, signed) {
         (Some(len), _) => {
-            let mut hr = HashingReader {
+            let mut hr = DualHashingReader {
                 inner: buf.by_ref().take(len),
-                hasher: &mut hasher,
+                first: &mut signature_hasher,
+                second: &mut content_hasher,
             };
             let total = stream::decrypt(&pk, &mut hr, writer, progress)?;
             // The digest must cover the whole payload REGION, not merely the
@@ -633,13 +816,15 @@ where
                 buf.read_exact(&mut sig)
                     .map_err(|_| Error::Integrity("signature trailer is missing".into()))?;
             }
+            require_eof(&mut buf)?;
             (total, sig)
         }
         (None, false) => {
             // Unsigned and unbounded: stream to end of input.
-            let mut hr = HashingReader {
+            let mut hr = DualHashingReader {
                 inner: buf.by_ref(),
-                hasher: &mut hasher,
+                first: &mut signature_hasher,
+                second: &mut content_hasher,
             };
             let total = stream::decrypt(&pk, &mut hr, writer, progress)?;
             (total, Vec::new())
@@ -652,9 +837,10 @@ where
             // its window at EOF is exactly the trailer. Constant memory.
             let mut delay = DelayReader::new(buf.by_ref(), SIG_LEN);
             let total = {
-                let mut hr = HashingReader {
+                let mut hr = DualHashingReader {
                     inner: &mut delay,
-                    hasher: &mut hasher,
+                    first: &mut signature_hasher,
+                    second: &mut content_hasher,
                 };
                 stream::decrypt(&pk, &mut hr, writer, progress)?
             };
@@ -665,29 +851,36 @@ where
 
     let mut verified_key = None;
     if let Some(vk_bytes) = &header.verifying_key {
-        let vk_arr = Array::try_from(vk_bytes.as_slice())
-            .map_err(|_| Error::Header("bad verifying key length".into()))?;
-        let vk = VerifyingKey::<MlDsa87>::decode(&vk_arr);
-        let sig_arr = Array::try_from(sig_bytes.as_slice())
-            .map_err(|_| Error::Integrity("bad signature length".into()))?;
-        let sig = Signature::<MlDsa87>::decode(&sig_arr).ok_or(Error::BadSignature)?;
-
-        let digest = hasher.finalize();
-        if !vk.verify_with_context(&digest, SIG_CONTEXT, &sig) {
-            return Err(Error::BadSignature);
-        }
+        check_signature(vk_bytes, &sig_bytes, signature_hasher)?;
         verified_key = Some(vk_bytes.clone());
     }
+    content_hasher.update(&sig_bytes);
 
-    Ok(Decrypted {
+    Ok(DecryptionReport {
         bytes: total,
         verified_key,
+        content_id: finish_content_id(content_hasher),
     })
 }
 
 struct HashingReader<'a, R: Read> {
     inner: R,
     hasher: &'a mut Sha512,
+}
+
+struct DualHashingReader<'a, R: Read> {
+    inner: R,
+    first: &'a mut Sha512,
+    second: &'a mut Sha512,
+}
+
+impl<R: Read> Read for DualHashingReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.first.update(&buf[..n]);
+        self.second.update(&buf[..n]);
+        Ok(n)
+    }
 }
 
 impl<R: Read> Read for HashingReader<'_, R> {
@@ -708,6 +901,37 @@ pub struct Inspection {
     pub header_bytes: u64,
     pub payload_bytes: u64,
     pub chunks: u64,
+}
+
+/// Full-container inspection bound to the exact decoded bytes.
+///
+/// The released header-only [`Inspection`] shape remains unchanged. APIs that
+/// consume the complete input return this report with a mandatory content ID.
+#[derive(Debug)]
+pub struct InspectionReport {
+    pub format: String,
+    pub recipients: usize,
+    pub signed: bool,
+    pub verifying_key: Option<Vec<u8>>,
+    pub header_bytes: u64,
+    pub payload_bytes: u64,
+    pub chunks: u64,
+    /// SHA-512 over the complete decoded binary container.
+    pub content_id: ContentId,
+}
+
+impl From<InspectionReport> for Inspection {
+    fn from(report: InspectionReport) -> Self {
+        Self {
+            format: report.format,
+            recipients: report.recipients,
+            signed: report.signed,
+            verifying_key: report.verifying_key,
+            header_bytes: report.header_bytes,
+            payload_bytes: report.payload_bytes,
+            chunks: report.chunks,
+        }
+    }
 }
 
 /// A reader that withholds the final `tail` bytes of a stream.
@@ -814,8 +1038,7 @@ pub fn inspect<R: Read>(reader: R, total_len: u64) -> Result<Inspection> {
     let sig_len = if signed { SIG_LEN as u64 } else { 0 };
 
     let payload = payload_span(total_len, header_len, sig_len)?;
-    let chunk_ct = stream::CHUNK_CT as u64;
-    let chunks = payload.div_ceil(chunk_ct).max(1);
+    let geometry = stream::payload_geometry(payload)?;
 
     Ok(Inspection {
         format: MAGIC.to_string(),
@@ -824,7 +1047,65 @@ pub fn inspect<R: Read>(reader: R, total_len: u64) -> Result<Inspection> {
         verifying_key: header.verifying_key,
         header_bytes: header_len,
         payload_bytes: payload,
-        chunks,
+        chunks: geometry.chunks,
+    })
+}
+
+/// Inspect a stream of unknown length in constant memory.
+///
+/// Unlike header-only [`inspect`], this consumes the complete decoded binary
+/// container so it can report exact payload geometry and a [`ContentId`].
+pub fn inspect_unsized<R: Read>(reader: R) -> Result<InspectionReport> {
+    inspect_full(reader, None)
+}
+
+/// Inspect and hash a complete decoded binary container whose length is known.
+///
+/// The whole reader is consumed and its observed length must equal
+/// `total_len`. Use header-only [`inspect`] when a content identifier is not
+/// needed and avoiding a full read matters.
+pub fn inspect_with_content_id<R: Read>(reader: R, total_len: u64) -> Result<InspectionReport> {
+    inspect_full(reader, Some(total_len))
+}
+
+fn inspect_full<R: Read>(reader: R, expected_total: Option<u64>) -> Result<InspectionReport> {
+    let mut buf = BufReader::new(reader);
+    let header = Header::parse(&mut buf)?;
+    let header_len = header.raw.len() as u64;
+    let signed = header.verifying_key.is_some();
+    let sig_len = if signed { SIG_LEN as u64 } else { 0 };
+
+    let mut hasher = Sha512::new();
+    hasher.update(&header.raw);
+    let remainder = {
+        let mut hashing = HashingReader {
+            inner: buf,
+            hasher: &mut hasher,
+        };
+        std::io::copy(&mut hashing, &mut std::io::sink())?
+    };
+    let observed_total = header_len
+        .checked_add(remainder)
+        .ok_or_else(|| Error::Integrity("container length overflow".into()))?;
+    if let Some(expected) = expected_total {
+        if observed_total != expected {
+            return Err(Error::Integrity(format!(
+                "container length mismatch: expected {expected} bytes, read {observed_total}"
+            )));
+        }
+    }
+
+    let payload = payload_span(observed_total, header_len, sig_len)?;
+    let geometry = stream::payload_geometry(payload)?;
+    Ok(InspectionReport {
+        format: MAGIC.to_string(),
+        recipients: header.stanzas.len(),
+        signed,
+        verifying_key: header.verifying_key,
+        header_bytes: header_len,
+        payload_bytes: geometry.bytes,
+        chunks: geometry.chunks,
+        content_id: finish_content_id(hasher),
     })
 }
 
@@ -839,18 +1120,47 @@ pub struct Verification {
     pub signed: bool,
     /// The embedded ML-DSA-87 verifying key, when the container carries one.
     pub verifying_key: Option<Vec<u8>>,
-    /// `Some(true)` when the signature verified. `None` when the container is
-    /// unsigned, which is a distinct state and never a pass: a signature can
-    /// be stripped by any recipient (see the format specification, 10.6), so
-    /// its absence is not evidence about whether the sender signed.
-    ///
-    /// A signature that is present and does not verify is reported as
-    /// [`Error::BadSignature`], never as `Some(false)`, so that a caller which
-    /// ignores the error cannot mistake a forgery for a result.
+    /// `Some(true)` when the signature verified. `None` means the container is
+    /// unsigned, which is a distinct state and never a pass. A signature
+    /// mismatch is returned as [`Error::BadSignature`].
     pub signature_ok: Option<bool>,
     pub header_bytes: u64,
     pub payload_bytes: u64,
     pub chunks: u64,
+}
+
+/// Content-bound outcome of a keyless signature check.
+///
+/// Reporting APIs preserve a structurally valid negative cryptographic
+/// verdict as `Some(false)` and bind it to the complete container bytes. The
+/// released [`Verification`] shape and strict error behavior remain intact.
+#[derive(Debug)]
+pub struct VerificationReport {
+    pub format: String,
+    pub recipients: usize,
+    pub signed: bool,
+    pub verifying_key: Option<Vec<u8>>,
+    pub signature_ok: Option<bool>,
+    pub header_bytes: u64,
+    pub payload_bytes: u64,
+    pub chunks: u64,
+    /// SHA-512 over the complete decoded binary container.
+    pub content_id: ContentId,
+}
+
+impl From<VerificationReport> for Verification {
+    fn from(report: VerificationReport) -> Self {
+        Self {
+            format: report.format,
+            recipients: report.recipients,
+            signed: report.signed,
+            verifying_key: report.verifying_key,
+            signature_ok: report.signature_ok,
+            header_bytes: report.header_bytes,
+            payload_bytes: report.payload_bytes,
+            chunks: report.chunks,
+        }
+    }
 }
 
 /// Verify a container's signature **without any private key**.
@@ -877,6 +1187,18 @@ pub fn verify<R: Read>(reader: R, total_len: u64) -> Result<Verification> {
     verify_with_progress(reader, total_len, |_| {})
 }
 
+/// Verify while retaining a content-bound negative signature verdict.
+///
+/// A structurally complete signed container whose ML-DSA signature does not
+/// verify returns `Ok(VerificationReport { signature_ok: Some(false), .. })`, along
+/// with its signer key, payload geometry, and [`ContentId`]. Malformed,
+/// truncated, or otherwise structurally unverifiable input still returns an
+/// error and is never converted into a false verdict. Use [`verify`] when a
+/// mismatch itself must remain [`Error::BadSignature`].
+pub fn verify_report<R: Read>(reader: R, total_len: u64) -> Result<VerificationReport> {
+    verify_report_with_progress(reader, total_len, |_| {})
+}
+
 /// [`verify`] for a stream of unknown length, such as a pipe.
 ///
 /// Uses the same delay buffer as [`decrypt_unsized`]: the trailing `SIG_LEN`
@@ -888,33 +1210,44 @@ pub fn verify<R: Read>(reader: R, total_len: u64) -> Result<Verification> {
 /// entry point meant to be aimed at a container from a stranger, so it must
 /// not require holding that container in memory to form an opinion about it.
 pub fn verify_unsized<R: Read>(reader: R) -> Result<Verification> {
+    strict_verification(verify_unsized_report(reader)?)
+}
+
+/// Unknown-length counterpart to [`verify_report`].
+///
+/// Input remains constant-memory: the fixed signature trailer is withheld in
+/// a delay window while the payload is hashed. Structural failures remain
+/// errors; only an actual ML-DSA mismatch becomes `signature_ok: Some(false)`.
+pub fn verify_unsized_report<R: Read>(reader: R) -> Result<VerificationReport> {
     let mut buf = BufReader::new(reader);
     let header = Header::parse(&mut buf)?;
     let header_len = header.raw.len() as u64;
     let signed = header.verifying_key.is_some();
 
-    let mut out = Verification {
-        format: MAGIC.to_string(),
-        recipients: header.stanzas.len(),
-        signed,
-        verifying_key: header.verifying_key.clone(),
-        signature_ok: None,
-        header_bytes: header_len,
-        payload_bytes: 0,
-        chunks: 1,
-    };
-
-    let Some(vk_bytes) = header.verifying_key.as_ref() else {
-        // Nothing to check, and the payload length is not worth a full read to
-        // learn. Drain so the caller's pipe does not block on a writer.
-        let mut sink = std::io::sink();
-        out.payload_bytes = std::io::copy(&mut buf, &mut sink)?;
-        out.chunks = out.payload_bytes.div_ceil(stream::CHUNK_CT as u64).max(1);
-        return Ok(out);
-    };
-
     let mut hasher = Sha512::new();
     hasher.update(&header.raw);
+
+    let Some(vk_bytes) = header.verifying_key.as_ref() else {
+        let payload = {
+            let mut hashing = HashingReader {
+                inner: buf,
+                hasher: &mut hasher,
+            };
+            std::io::copy(&mut hashing, &mut std::io::sink())?
+        };
+        let geometry = stream::payload_geometry(payload)?;
+        return Ok(VerificationReport {
+            format: MAGIC.to_string(),
+            recipients: header.stanzas.len(),
+            signed,
+            verifying_key: None,
+            signature_ok: None,
+            header_bytes: header_len,
+            payload_bytes: geometry.bytes,
+            chunks: geometry.chunks,
+            content_id: finish_content_id(hasher),
+        });
+    };
 
     let mut delay = DelayReader::new(buf.by_ref(), SIG_LEN);
     let mut window = vec![0u8; 64 << 10];
@@ -931,15 +1264,22 @@ pub fn verify_unsized<R: Read>(reader: R) -> Result<Verification> {
         .take_tail()
         .ok_or_else(|| Error::Integrity("signature trailer is truncated".into()))?;
 
-    if payload < stream::TAG as u64 {
-        return Err(Error::Integrity("file is truncated".into()));
-    }
-    out.payload_bytes = payload;
-    out.chunks = payload.div_ceil(stream::CHUNK_CT as u64).max(1);
+    let geometry = stream::payload_geometry(payload)?;
 
-    check_signature(vk_bytes, &sig_bytes, hasher)?;
-    out.signature_ok = Some(true);
-    Ok(out)
+    let mut content_hasher = hasher.clone();
+    content_hasher.update(&sig_bytes);
+    let signature_ok = signature_verdict(vk_bytes, &sig_bytes, hasher)?;
+    Ok(VerificationReport {
+        format: MAGIC.to_string(),
+        recipients: header.stanzas.len(),
+        signed,
+        verifying_key: header.verifying_key,
+        signature_ok: Some(signature_ok),
+        header_bytes: header_len,
+        payload_bytes: geometry.bytes,
+        chunks: geometry.chunks,
+        content_id: finish_content_id(content_hasher),
+    })
 }
 
 /// Decode the key and trailer and check the digest under them.
@@ -947,18 +1287,30 @@ pub fn verify_unsized<R: Read>(reader: R) -> Result<Verification> {
 /// Shared by the sized and unsized paths so there is exactly one place where a
 /// signature is judged, and no way for the two to drift apart.
 fn check_signature(vk_bytes: &[u8], sig_bytes: &[u8], hasher: Sha512) -> Result<()> {
+    if signature_verdict(vk_bytes, sig_bytes, hasher)? {
+        Ok(())
+    } else {
+        Err(Error::BadSignature)
+    }
+}
+
+/// Return a cryptographic verdict after all structural checks have completed.
+///
+/// An exact-length signature which fails decoding is an invalid signature,
+/// not a malformed container: its bytes, signer, and content identity are all
+/// still well-defined and may be reported as a bound negative verdict.
+fn signature_verdict(vk_bytes: &[u8], sig_bytes: &[u8], hasher: Sha512) -> Result<bool> {
     let vk_arr =
         Array::try_from(vk_bytes).map_err(|_| Error::Header("bad verifying key length".into()))?;
     let vk = VerifyingKey::<MlDsa87>::decode(&vk_arr);
     let sig_arr =
         Array::try_from(sig_bytes).map_err(|_| Error::Integrity("bad signature length".into()))?;
-    let sig = Signature::<MlDsa87>::decode(&sig_arr).ok_or(Error::BadSignature)?;
+    let Some(sig) = Signature::<MlDsa87>::decode(&sig_arr) else {
+        return Ok(false);
+    };
 
     let digest = hasher.finalize();
-    if !vk.verify_with_context(&digest, SIG_CONTEXT, &sig) {
-        return Err(Error::BadSignature);
-    }
-    Ok(())
+    Ok(vk.verify_with_context(&digest, SIG_CONTEXT, &sig))
 }
 
 /// [`verify`], reporting bytes hashed so far.
@@ -966,11 +1318,23 @@ fn check_signature(vk_bytes: &[u8], sig_bytes: &[u8], hasher: Sha512) -> Result<
 /// The callback receives a running count of payload bytes consumed, so a
 /// caller can show progress while checking a container too large to sit in
 /// memory.
-pub fn verify_with_progress<R, F>(
+pub fn verify_with_progress<R, F>(reader: R, total_len: u64, progress: F) -> Result<Verification>
+where
+    R: Read,
+    F: FnMut(u64),
+{
+    strict_verification(verify_report_with_progress(reader, total_len, progress)?)
+}
+
+/// Reporting counterpart to [`verify_with_progress`].
+///
+/// Preserves a content-bound `Some(false)` only for a cryptographic signature
+/// mismatch; all structural failures remain errors.
+pub fn verify_report_with_progress<R, F>(
     reader: R,
     total_len: u64,
     mut progress: F,
-) -> Result<Verification>
+) -> Result<VerificationReport>
 where
     R: Read,
     F: FnMut(u64),
@@ -983,34 +1347,7 @@ where
 
     let payload = payload_span(total_len, header_len, sig_len)?;
 
-    // Even an empty plaintext produces one chunk, which is a bare AEAD tag.
-    // A payload region smaller than that cannot be a container, and saying so
-    // here keeps a grossly truncated file out of the signature path -- where
-    // it would come back as "signature failed" and read as forgery rather
-    // than as damage.
-    if payload < stream::TAG as u64 {
-        return Err(Error::Integrity("file is truncated".into()));
-    }
-
-    let chunk_ct = stream::CHUNK_CT as u64;
-    let chunks = payload.div_ceil(chunk_ct).max(1);
-
-    let mut out = Verification {
-        format: MAGIC.to_string(),
-        recipients: header.stanzas.len(),
-        signed,
-        verifying_key: header.verifying_key.clone(),
-        signature_ok: None,
-        header_bytes: header_len,
-        payload_bytes: payload,
-        chunks,
-    };
-
-    // Unsigned is a complete answer, not a failure. Report it and stop rather
-    // than reading a payload whose bytes cannot change the verdict.
-    let Some(vk_bytes) = header.verifying_key.as_ref() else {
-        return Ok(out);
-    };
+    let geometry = stream::payload_geometry(payload)?;
 
     // Hash the header and the payload ciphertext exactly as the signer did.
     // The ciphertext is hashed as it lies on disk; it is never decrypted, so
@@ -1037,18 +1374,44 @@ where
         progress(hashed);
     }
 
-    let mut sig_bytes = vec![0u8; SIG_LEN];
-    buf.read_exact(&mut sig_bytes).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            Error::Integrity("signature trailer is truncated".into())
-        } else {
-            Error::Io(e)
-        }
-    })?;
+    let mut signature_ok = None;
+    let mut sig_bytes = Vec::new();
+    if header.verifying_key.is_some() {
+        sig_bytes.resize(SIG_LEN, 0);
+        buf.read_exact(&mut sig_bytes).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                Error::Integrity("signature trailer is truncated".into())
+            } else {
+                Error::Io(e)
+            }
+        })?;
+    }
 
-    check_signature(vk_bytes, &sig_bytes, hasher)?;
-    out.signature_ok = Some(true);
-    Ok(out)
+    require_eof(&mut buf)?;
+    if let Some(vk_bytes) = header.verifying_key.as_ref() {
+        signature_ok = Some(signature_verdict(vk_bytes, &sig_bytes, hasher.clone())?);
+    }
+
+    hasher.update(&sig_bytes);
+    Ok(VerificationReport {
+        format: MAGIC.to_string(),
+        recipients: header.stanzas.len(),
+        signed,
+        verifying_key: header.verifying_key,
+        signature_ok,
+        header_bytes: header_len,
+        payload_bytes: geometry.bytes,
+        chunks: geometry.chunks,
+        content_id: finish_content_id(hasher),
+    })
+}
+
+fn strict_verification(verification: VerificationReport) -> Result<Verification> {
+    if verification.signature_ok == Some(false) {
+        Err(Error::BadSignature)
+    } else {
+        Ok(verification.into())
+    }
 }
 
 #[cfg(kani)]

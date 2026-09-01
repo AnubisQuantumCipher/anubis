@@ -3,6 +3,7 @@
 #include <QDebug>
 #include <QTimer>
 
+#include <cstdlib>
 #include <csignal>
 
 Process::Process(QObject* parent) : QObject(parent) {}
@@ -50,6 +51,12 @@ void Process::start() {
     qWarning() << "anubis-desktop: refusing to start a process with no command";
     return;
   }
+
+  // The QML-owned sinks outlive an individual QProcess. Reset them before
+  // replacing the child so a successful prior response can never satisfy a
+  // later run that emitted nothing or failed before writing.
+  if (mStdout) mStdout->reset();
+  if (mStderr) mStderr->reset();
 
   // A fresh QProcess per run. Reusing one would carry the previous run's
   // buffered bytes and exit state into this one, which is exactly the sort of
@@ -143,6 +150,19 @@ void Process::settle(int exitCode, int exitStatus) {
     drain(QProcess::StandardOutput);
     drain(QProcess::StandardError);
   }
+
+  // A decoder can retain an incomplete UTF-8 prefix after the pipe reaches
+  // EOF. Feed a private ASCII sentinel through each decoder to force any such
+  // prefix into its error state; an ASCII byte can never continue a multibyte
+  // UTF-8 sequence. The decoded probes are deliberately not sent to the
+  // stream sinks. This works across the supported Qt 6.5+ API surface, where
+  // QStringDecoder::finalize() is not yet available.
+  const QString outProbe = mOutDecoder.decode(QByteArray(1, '\0'));
+  const QString errProbe = mErrDecoder.decode(QByteArray(1, '\0'));
+  const bool encodingError = mOutDecoder.hasError() || mErrDecoder.hasError();
+  Q_UNUSED(outProbe)
+  Q_UNUSED(errProbe)
+  if (encodingError && exitCode == EXIT_SUCCESS) exitCode = EXIT_FAILURE;
 
   // Streams close before the exit is announced, because the QML handler for
   // `exited` reads what those streams collected.

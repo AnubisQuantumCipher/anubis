@@ -171,6 +171,10 @@ mid-group split is the same silent half-truth as an elide.
 - A field the engine did not state renders as *not stated*, never as a pass.
 - A failed poll clears the status rather than leaving the last good one on
   screen — a dead binary must not go on asserting that everything is fine.
+- A poll is accepted only when the child exits successfully and emits exactly
+  one complete, schema-valid status record. Probe and poll children have fixed
+  deadlines, and status output is capped before it reaches the long-lived
+  readout.
 - The readout's age is always on screen, because every other number depends on
   it.
 - The boundary line is pinned outside the scroll area.

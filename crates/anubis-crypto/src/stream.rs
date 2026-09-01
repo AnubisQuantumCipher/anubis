@@ -23,6 +23,42 @@ pub const TAG: usize = 16;
 /// Ciphertext chunk size.
 pub const CHUNK_CT: usize = CHUNK + TAG;
 
+/// Validated geometry of an encoded STREAM payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PayloadGeometry {
+    /// Ciphertext bytes, including one Poly1305 tag per chunk.
+    pub bytes: u64,
+    /// Number of encoded chunks.
+    pub chunks: u64,
+}
+
+/// Validate the byte geometry of an encoded STREAM payload.
+///
+/// Every non-final chunk occupies exactly [`CHUNK_CT`] bytes. The final
+/// chunk contains up to [`CHUNK`] plaintext bytes and exactly one [`TAG`],
+/// so a short final fragment can never be shorter than a tag. Empty
+/// plaintext is represented by one tag-only final chunk.
+pub fn payload_geometry(bytes: u64) -> Result<PayloadGeometry> {
+    if bytes < TAG as u64 {
+        return Err(Error::Integrity(
+            "truncated payload: first chunk is shorter than an authentication tag".into(),
+        ));
+    }
+
+    let chunk_ct = CHUNK_CT as u64;
+    let final_len = bytes % chunk_ct;
+    if final_len != 0 && final_len < TAG as u64 {
+        return Err(Error::Integrity(
+            "truncated payload: trailing bytes are shorter than an authentication tag".into(),
+        ));
+    }
+
+    Ok(PayloadGeometry {
+        bytes,
+        chunks: bytes.div_ceil(chunk_ct),
+    })
+}
+
 fn nonce_for(counter: u64, last: bool) -> Result<Nonce> {
     // 11-byte counter space; refuse rather than wrap.
     if counter >= 1u64 << 56 {
@@ -122,6 +158,7 @@ where
     let mut cur_len = read_upto(reader, &mut cur)?;
     let mut counter: u64 = 0;
     let mut total: u64 = 0;
+    let mut ciphertext_total: u64 = 0;
 
     // A payload always has at least one chunk, even when empty.
     if cur_len < TAG {
@@ -158,6 +195,9 @@ where
         writer.write_all(&buf)?;
 
         total += buf.len() as u64;
+        ciphertext_total = ciphertext_total
+            .checked_add(cur_len as u64)
+            .ok_or_else(|| Error::Integrity("payload length overflow".into()))?;
         progress(total);
 
         if last {
@@ -168,6 +208,7 @@ where
         counter += 1;
     }
 
+    payload_geometry(ciphertext_total)?;
     Ok(total)
 }
 

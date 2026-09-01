@@ -2450,10 +2450,11 @@ Item {
               // (always null -- it holds no key) or a decrypt of this exact
               // container that already had to check it. The second is a fact
               // about a check that ran, so it is allowed to promote the chip.
-              readonly property string attestedAt:
-                anubis.macAttestedAt(anubis.inspectPath)
+              readonly property var macAttestation:
+                anubis.macAttestationFor(anubis.inspectResult)
               readonly property string macTone:
-                Model.macToneAttested(anubis.inspectResult, inspector.attestedAt)
+                Model.macToneAttested(anubis.inspectResult,
+                                      inspector.macAttestation)
               readonly property bool tampered:
                 anubis.inspectResult !== null && inspector.macTone === "bad"
               // Accent means verified. The card only earns it when something
@@ -2607,7 +2608,7 @@ Item {
                              : (inspector.macTone === "bad"
                                 ? Model.GLYPH.shieldAlert : Model.GLYPH.shield))
                         + "  " + Model.macLabelAttested(anubis.inspectResult,
-                                                        inspector.attestedAt)
+                                                   inspector.macAttestation)
                       color: root.toneColor(inspector.macTone)
                       font.bold: true
                       font.pixelSize: Style.font.bodySmall
@@ -2616,7 +2617,7 @@ Item {
                       width: macCol.width
                       wrapMode: Text.WordWrap
                       text: Model.macExplanationAttested(anubis.inspectResult,
-                                                         inspector.attestedAt)
+                                                   inspector.macAttestation)
                       color: Qt.alpha(root.fg, 0.45)
                     }
                   }
@@ -2630,7 +2631,7 @@ Item {
                   // header, and a signature is only checked by hashing the
                   // whole payload.
                   readonly property var attested:
-                    anubis.sigAttestedFor(anubis.inspectPath)
+                    anubis.sigAttestedFor(anubis.inspectResult)
                   readonly property string sigTone:
                     Model.signatureToneAttested(anubis.inspectResult,
                                                 sigPanel.attested)

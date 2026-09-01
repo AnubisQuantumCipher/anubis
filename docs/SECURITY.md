@@ -459,7 +459,10 @@ C code and no system cryptographic library in the dependency graph.
 | ML-DSA-87 | `ml-dsa` | FIPS 204 |
 | ChaCha20-Poly1305 | `chacha20poly1305` | RFC 8439 |
 | SHA-2, HMAC, HKDF | `sha2`, `hmac`, `hkdf` | FIPS 180-4, RFC 2104, RFC 5869 |
-| Bech32 | `bech32` | BIP-173 |
+| Bech32m key encoding | `bech32` | BIP-350 |
+
+ANUBIS writes Bech32m. Its readers retain one-way compatibility with legacy
+BIP-173 Bech32 checksums and canonicalize accepted keys back to Bech32m.
 
 A vulnerability in any of these is a vulnerability in ANUBIS. `Cargo.lock` is
 committed so that builds are reproducible and so that a dependency advisory can
@@ -523,6 +526,23 @@ won or lost.
   nothing to discard, but that is a property of this implementation and not of
   the format: another conforming implementation may stream straight to the pipe.
   See `FORMAT.md` section 9.
+- **Treat forced termination as an abnormal recovery case.** `SIGINT` and
+  `SIGTERM` are handled cooperatively and remove an owned output sidecar when
+  the engine reaches an I/O boundary. A silent pipe whose read is restarted by
+  the operating system may need data or EOF before that boundary is reached.
+  On an ordinary error, the sidecar name is removed while its protected handle
+  is still open; on Windows that handle continues denying read/write sharing
+  until removal has succeeded. If removal itself is refused, the implementation
+  makes a best-effort truncation of unpublished staging data while the handle
+  is still protected. A file already published through the atomic no-replace
+  hard-link path is never truncated merely because sidecar cleanup failed.
+  `SIGKILL`, a crash, or power loss cannot run cleanup and may leave a hidden,
+  sidecar beside the intended destination. Unix creates it at mode `0600`;
+  Windows denies read/write sharing while the staging handle is open, but a
+  sidecar left after forced process death inherits the destination directory's
+  ACL and must be treated as sensitive. It is never promoted to the
+  destination name; remove it only after confirming no ANUBIS process still
+  owns it.
 - **Insist on the signature you are relying on.** `decrypt` verifies a
   signature that is present, but silently accepts a container that has none, and
   any recipient can strip one (2.4). If a workflow's security argument depends

@@ -36,7 +36,7 @@ pub fn combine(
     salt.extend_from_slice(x25519_epk);
     salt.extend_from_slice(mlkem_ct);
 
-    let mut ikm = Vec::with_capacity(x25519_ss.len() + mlkem_ss.len());
+    let mut ikm = Zeroizing::new(Vec::with_capacity(x25519_ss.len() + mlkem_ss.len()));
     ikm.extend_from_slice(x25519_ss);
     ikm.extend_from_slice(mlkem_ss);
 
@@ -45,7 +45,6 @@ pub fn combine(
     hk.expand(COMBINER_INFO, &mut okm)
         .expect("32 bytes is far below the HKDF-SHA512 output limit");
 
-    ikm.zeroize();
     okm
 }
 
@@ -72,19 +71,29 @@ pub fn encapsulate(recipient: &Recipient) -> Result<Encapsulation> {
 
     let x25519_epk = *PublicKey::from(&eph).as_bytes();
     let peer = PublicKey::from(*recipient.x25519_bytes());
-    let mut x25519_ss = eph.diffie_hellman(&peer).to_bytes();
+    let shared = eph.diffie_hellman(&peer);
+    if !shared.was_contributory() {
+        return Err(Error::Key(
+            "recipient X25519 public key is non-contributory".into(),
+        ));
+    }
+    let x25519_ss = Zeroizing::new(shared.to_bytes());
 
     // Post-quantum half: ML-KEM-1024.
     let ek = recipient.mlkem_key()?;
     let mut m = [0u8; 32];
     getrandom::fill(&mut m).map_err(|e| Error::Key(format!("system entropy unavailable: {e}")))?;
     let (ct, mlkem_ss) = ek.encapsulate_deterministic(&ml_kem::array::Array(m));
+    let mlkem_ss = Zeroizing::new(mlkem_ss);
     m.zeroize();
 
     let mlkem_ct = ct.as_slice().to_vec();
-    let wrap_key = combine(&x25519_ss, mlkem_ss.as_slice(), &x25519_epk, &mlkem_ct);
-    x25519_ss.zeroize();
-
+    let wrap_key = combine(
+        x25519_ss.as_slice(),
+        mlkem_ss.as_slice(),
+        &x25519_epk,
+        &mlkem_ct,
+    );
     Ok(Encapsulation {
         x25519_epk,
         mlkem_ct,
@@ -113,16 +122,25 @@ pub fn decapsulate(
 
     let mut epk = [0u8; X25519_PUB_LEN];
     epk.copy_from_slice(x25519_epk);
-    let mut x25519_ss = identity
+    let shared = identity
         .x25519_secret()
-        .diffie_hellman(&PublicKey::from(epk))
-        .to_bytes();
+        .diffie_hellman(&PublicKey::from(epk));
+    if !shared.was_contributory() {
+        return Err(Error::Header(
+            "ephemeral X25519 key is non-contributory".into(),
+        ));
+    }
+    let x25519_ss = Zeroizing::new(shared.to_bytes());
 
     let ct = ml_kem::array::Array::try_from(mlkem_ct)
         .map_err(|_| Error::Header("bad ML-KEM ciphertext length".into()))?;
-    let mlkem_ss = identity.mlkem_key().decapsulate(&ct);
+    let mlkem_ss = Zeroizing::new(identity.mlkem_key().decapsulate(&ct));
 
-    let wrap_key = combine(&x25519_ss, mlkem_ss.as_slice(), x25519_epk, mlkem_ct);
-    x25519_ss.zeroize();
+    let wrap_key = combine(
+        x25519_ss.as_slice(),
+        mlkem_ss.as_slice(),
+        x25519_epk,
+        mlkem_ct,
+    );
     Ok(wrap_key)
 }

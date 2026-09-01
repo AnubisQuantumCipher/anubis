@@ -71,6 +71,8 @@ Item {
   property double opDone: 0
   property double opTotal: 0
   property var opResult: null           // last {"kind":"result"} object
+  property int opResultCount: 0
+  property bool opProtocolValid: true
   property string opError: ""
   readonly property bool opBusy: opProc.running
   readonly property real opPct: Model.pctOf(opDone, opTotal)
@@ -81,27 +83,110 @@ Item {
   // known-unknown, not a stalled operation, and the UI is told which it is.
   readonly property bool opIndeterminate: opBusy && opTotal <= 0
 
-  // Containers whose header MAC a decrypt in this session actually verified,
-  // keyed by path, valued by when. Never persisted and never inferred: it is
-  // the record of a check that happened, not a belief about a file.
+  // Containers whose header MAC a decrypt in this session actually verified.
+  // Keys are SHA-512 content IDs over the complete decoded container, never
+  // mutable paths. Values retain the path only so a later inspection of that
+  // path can evict an obsolete entry after the bytes change.
   property var macAttested: ({})
 
-  function macAttestedAt(path) {
-    var p = String(path || "")
-    return p !== "" && macAttested[p] ? String(macAttested[p]) : ""
+  function macAttestationFor(inspect) {
+    var id = Model.contentId(inspect)
+    if (id === "" || !macAttested[id]) return null
+    var attested = macAttested[id]
+    return attested.content_id === id ? attested : null
   }
 
   // Signatures whose validity a `verify` in this session actually established,
-  // keyed by path. Same discipline as macAttested: the record of a check that
-  // ran, never persisted and never inferred. `inspect` reads the header only,
-  // so it can say a container is signed and can never say the signature is
-  // good; only this map may promote the chip.
+  // keyed by the same immutable content ID. The cached signer must also equal
+  // the current header's signer or the entry is unusable. `inspect` reads the
+  // header only, so only this map may promote the chip.
   property var sigAttested: ({})
   readonly property bool verifyBusy: verifyProc.running
+  property int verifyGeneration: 0
 
-  function sigAttestedFor(path) {
-    var p = String(path || "")
-    return p !== "" && sigAttested[p] ? sigAttested[p] : null
+  function sigAttestedFor(inspect) {
+    var id = Model.contentId(inspect)
+    if (id === "" || !sigAttested[id]) return null
+    var attested = sigAttested[id]
+    if (attested.content_id !== id) return null
+    var current = Model.signerFingerprint(inspect)
+    var checked = Model.formatFingerprint(attested.fingerprint)
+    return current !== "" && Model.validFingerprint(current)
+      && checked === current ? attested : null
+  }
+
+  function reconcileAttestations(path, inspect) {
+    var target = String(path || "")
+    var currentId = Model.contentId(inspect)
+    var currentSigner = Model.signerFingerprint(inspect)
+    var nextMac = {}
+    for (var mk in macAttested) {
+      var mac = macAttested[mk]
+      if (String(mac.path || "") !== target || mk === currentId)
+        nextMac[mk] = mac
+    }
+    macAttested = nextMac
+
+    var nextSig = {}
+    for (var sk in sigAttested) {
+      var sig = sigAttested[sk]
+      var samePath = String(sig.path || "") === target
+      var sameContent = sk === currentId
+      var sameSigner = Model.formatFingerprint(sig.fingerprint) === currentSigner
+      if (!samePath || (sameContent && sameSigner)) nextSig[sk] = sig
+    }
+    sigAttested = nextSig
+  }
+
+  function verifiedDecryptPolicyForPath(path) {
+    var target = Model.normalizePath(path, home)
+    if (target === "" || target !== inspectPath || !inspectResult) return null
+    var attested = sigAttestedFor(inspectResult)
+    if (!attested || attested.ok !== true) return null
+    var signer = Model.formatFingerprint(attested.fingerprint)
+    var contentId = Model.contentId(inspectResult)
+    return Model.validFingerprint(signer) && contentId !== ""
+      ? { signer: signer, content_id: contentId } : null
+  }
+
+  function retainDecryptAttestations(result) {
+    var contentId = Model.contentId(result)
+    var target = Model.normalizePath(String(result.path || opInput), home)
+    if (contentId === "") {
+      opError = "Decryption completed, but the engine returned no valid "
+        + "content_id; no authentication attestation was retained."
+      return
+    }
+    var now = new Date().toISOString()
+    if (result.header_mac_ok === true) {
+      var nextMac = {}
+      for (var mk in macAttested) nextMac[mk] = macAttested[mk]
+      nextMac[contentId] = {
+        at: now,
+        content_id: contentId,
+        path: target
+      }
+      macAttested = nextMac
+    }
+    if (result.signature_ok === true) {
+      var signer = Model.formatFingerprint(result.signer_fingerprint)
+      if (!Model.validFingerprint(signer)) {
+        opError = "Decryption completed, but the engine returned no valid "
+          + "signer fingerprint; no signature attestation was retained."
+        return
+      }
+      var nextSig = {}
+      for (var sk in sigAttested) nextSig[sk] = sigAttested[sk]
+      nextSig[contentId] = {
+        ok: true,
+        at: now,
+        content_id: contentId,
+        path: target,
+        fingerprint: signer,
+        error: ""
+      }
+      sigAttested = nextSig
+    }
   }
 
   // Check a signature without a key. The signature covers a digest of the
@@ -116,28 +201,60 @@ Item {
       return
     }
     if (verifyProc.running) return
+    if (p !== inspectPath || !inspectResult) {
+      actionError = "Inspect this container before verifying it."
+      return
+    }
+    var contentId = Model.contentId(inspectResult)
+    var signer = Model.signerFingerprint(inspectResult)
+    if (contentId === "") {
+      actionError = "This engine did not provide a valid content_id; "
+        + "verification cannot be bound to immutable bytes."
+      return
+    }
+    if (!Model.validFingerprint(signer)) {
+      actionError = "The inspected container did not provide a valid signer "
+        + "fingerprint."
+      return
+    }
     actionError = ""
     actionStatus = "Verifying signature..."
+    verifyGeneration += 1
     verifyProc.target = p
+    verifyProc.generation = verifyGeneration
+    verifyProc.expectedContentId = contentId
+    verifyProc.expectedSigner = signer
     verifyProc.outText = ""
     verifyProc.errText = ""
     verifyProc.command = [enginePath, "verify", "--json", p]
     verifyProc.running = true
   }
 
-  function applyVerify(raw, stderrText, exitCode) {
-    var target = String(verifyProc.target || "")
+  function applyVerify(raw, stderrText, exitCode, target, generation,
+                       expectedContentId, expectedSigner) {
+    // A cancelled run is allowed to exit later; it is never allowed to write
+    // into the state for the inspection that replaced it.
+    if (!Model.runIsCurrent(generation, target, verifyGeneration, inspectPath)
+        || expectedContentId !== Model.contentId(inspectResult)) return
+
     var record = null
+    var recordCount = 0
+    var protocolValid = true
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).replace(/^\s+|\s+$/g, "") === "") continue
       var o = Model.parseLine(lines[i])
-      if (o && o.kind === "verify") record = o
+      if (o && o.kind === "verify") {
+        record = o
+        recordCount += 1
+      } else protocolValid = false
     }
     actionStatus = ""
 
-    if (target === "") return
-
-    if (record === null) {
+    var decision = Model.verifyRecordDecision(
+      record, exitCode, protocolValid, recordCount,
+      expectedContentId, expectedSigner)
+    if (decision === "record-invalid") {
       // No verdict is not a verdict. Say the check could not be made rather
       // than leaving a chip that implies one was.
       actionError = stderrText !== "" ? stderrText
@@ -145,23 +262,44 @@ Item {
       return
     }
 
+    var actualContentId = Model.contentId(record)
+    var actualSigner = Model.formatFingerprint(record.signer_fingerprint)
+    if (decision === "content-mismatch") {
+      actionError = "The container changed while its signature was being "
+        + "verified; no verdict was retained."
+      return
+    }
+    if (decision === "signer-mismatch") {
+      actionError = "The signer changed while the signature was being "
+        + "verified; no verdict was retained."
+      return
+    }
+
     // Order matters. A verdict about the signature -- either way -- is what
     // this map exists to hold, so it is read first. Only when the engine
     // reached no verdict at all does the unsigned case apply; an unsigned
     // container is not a failed signature and must not be recorded as one.
-    if (record.signature_ok !== true && record.signature_ok !== false) {
+    if (decision === "verdict-missing") {
       actionError = record.signed === true
         ? String(record.error || "the signature could not be checked")
         : "This container carries no signature."
       return
     }
 
+    if (decision === "exit-failed") {
+      actionError = stderrText !== "" ? stderrText
+        : "anubis reported a valid signature but exited " + exitCode
+      return
+    }
+
     var next = {}
     for (var k in sigAttested) next[k] = sigAttested[k]
-    next[target] = {
+    next[actualContentId] = {
       ok: record.signature_ok === true,
       at: new Date().toISOString(),
-      fingerprint: String(record.signer_fingerprint || ""),
+      content_id: actualContentId,
+      path: target,
+      fingerprint: actualSigner,
       error: String(record.error || "")
     }
     sigAttested = next
@@ -177,6 +315,8 @@ Item {
   property string inspectPath: ""
   property var inspectResult: null
   property string inspectError: ""
+  property int inspectGeneration: 0
+  property var queuedInspect: null
   readonly property bool inspectBusy: inspectProc.running
 
   // ---- key and address-book actions ---------------------------------------
@@ -228,21 +368,26 @@ Item {
 
   function applyStatus(raw, stderrText, exitCode) {
     var parsed = null
+    var parsedCount = 0
+    var protocolValid = true
     var trimmed = String(raw || "").replace(/^\s+|\s+$/g, "")
     if (trimmed !== "") {
-      // `status` emits exactly one object, but a stray leading line from a
-      // future version must not take the whole read down.
       var lines = trimmed.split("\n")
-      for (var i = lines.length - 1; i >= 0 && parsed === null; i--) {
+      for (var i = 0; i < lines.length; i++) {
         var o = Model.parseLine(lines[i])
-        if (o && o.kind === "status") parsed = o
+        if (Model.validStatusRecord(o)) {
+          parsed = o
+          parsedCount += 1
+        } else protocolValid = false
       }
     }
-    if (parsed === null) {
+    if (exitCode !== 0 || !protocolValid || parsed === null
+        || parsedCount !== 1) {
       status = null
       statusError = stderrText !== "" ? stderrText
         : (exitCode === 127 ? "anubis could not execute"
-                            : "status produced no parsable payload")
+            : (exitCode !== 0 ? "anubis status exited " + exitCode
+                              : "status produced no complete payload"))
     } else {
       status = parsed
       statusError = ""
@@ -323,6 +468,16 @@ Item {
         cmd.push("-r", String(req.recipients[i]))
       if (req.sign) cmd.push("--sign")
     }
+    if (req.kind === "decrypt") {
+      // If these exact bytes were already verified, carry both immutable
+      // content identity and signer into decrypt. The engine re-checks both
+      // before publication, so neither a same-signer replacement nor a
+      // different signer can cross the inspect-to-decrypt boundary.
+      var policy = verifiedDecryptPolicyForPath(req.input)
+      if (policy)
+        cmd.push("--require-signature", "--signer", policy.signer,
+                 "--expect-content-id", policy.content_id)
+    }
     if (req.identity !== "") cmd.push("--identity", req.identity)
     cmd.push("-o", req.output)
     if (force) cmd.push("--force")
@@ -334,6 +489,8 @@ Item {
     opDone = 0
     opTotal = 0
     opResult = null
+    opResultCount = 0
+    opProtocolValid = true
     opError = ""
     opStartMs = Date.now()
     nowMs = opStartMs
@@ -352,59 +509,60 @@ Item {
   // record is stored whole and never summarised into a boolean here.
   function consumeLine(line) {
     var o = Model.parseLine(line)
-    if (!o) return
+    if (!o) {
+      opProtocolValid = false
+      opError = "anubis emitted a malformed JSON record"
+      return
+    }
     if (o.kind === "progress") {
       opDone = Number(o.done || 0)
       opTotal = Number(o.total || 0)
       nowMs = Date.now()
     } else if (o.kind === "result") {
+      opResultCount += 1
       opResult = o
+      if (opResultCount !== 1) {
+        opError = "anubis emitted more than one result record"
+        return
+      }
       if (o.ok === false) opError = String(o.error || "operation failed")
       else {
         opDone = Number(o.bytes || opDone)
         if (opTotal <= 0) opTotal = opDone
       }
-      // A successful decrypt is only reachable after the header MAC has
-      // already been checked, so `header_mac_ok: true` here is a fact about
-      // this container, not an inference. `inspect` can never state it --
-      // it holds no key -- so the one place the answer exists is recorded
-      // against the file it was established for, and nowhere else.
-      if (o.ok === true && o.header_mac_ok === true) {
-        var target = String(o.path || opInput)
-        if (target !== "") {
-          var next = {}
-          for (var k in macAttested) next[k] = macAttested[k]
-          next[target] = new Date().toISOString()
-          macAttested = next
-        }
-      }
-      // A signed container cannot decrypt successfully unless its signature
-      // verified first, so a successful decrypt attests the signature on the
-      // same footing as the header MAC. Recording it here means the operator
-      // is not asked to re-verify by hand something the engine just checked.
-      if (o.ok === true && o.signature_ok === true) {
-        var sigTarget = String(o.path || opInput)
-        if (sigTarget !== "") {
-          var sigNext = {}
-          for (var sk in sigAttested) sigNext[sk] = sigAttested[sk]
-          sigNext[sigTarget] = {
-            ok: true,
-            at: new Date().toISOString(),
-            fingerprint: String(o.signer_fingerprint || ""),
-            error: ""
-          }
-          sigAttested = sigNext
-        }
-      }
+    } else {
+      opProtocolValid = false
+      opError = "anubis emitted an unexpected " + String(o.kind)
+        + " record"
     }
   }
 
   function settleOperation(exitCode) {
     var kind = opKind
-    var ok = opResult ? opResult.ok === true : exitCode === 0
-    if (!opResult && exitCode !== 0 && opError === "")
+    var completeResult = opProtocolValid && opResult !== null
+      && opResultCount === 1
+      && (opResult.ok === true || opResult.ok === false)
+    if (completeResult && opResult.ok === true && kind === "decrypt") {
+      completeResult = Model.decryptResultAccepted(
+        opResult, exitCode, opProtocolValid, opResultCount, opInput, opOutput)
+    } else if (completeResult && opResult.ok === true) {
+      completeResult = String(opResult.op || "") === kind
+        && String(opResult.path || "") === opInput
+        && String(opResult.out || "") === opOutput
+        && typeof opResult.bytes === "number" && isFinite(opResult.bytes)
+        && opResult.bytes >= 0
+    }
+    var ok = exitCode === 0 && completeResult && opResult.ok === true
+    if (!completeResult && opError === "")
+      opError = "anubis exited " + exitCode
+        + " without exactly one complete result record"
+    else if (exitCode !== 0 && opError === "")
       opError = opProc.errText !== "" ? opProc.errText
-        : "anubis exited " + exitCode + " without a result record"
+        : "anubis exited " + exitCode
+
+    // Attest only after both the structured result and process exit agree on
+    // success. A result line followed by a crash is not a completed check.
+    if (ok && kind === "decrypt") retainDecryptAttestations(opResult)
     opKind = ""
     opStartMs = 0
     refresh()
@@ -421,45 +579,96 @@ Item {
   function runInspect(path) {
     var p = Model.normalizePath(path, home)
     if (p === "") return
+    inspectGeneration += 1
     inspectPath = p
+    inspectResult = null
+    inspectError = ""
+    queuedInspect = { path: p, generation: inspectGeneration }
+
+    // A verifier launched for a previous inspection is stale by definition.
+    verifyGeneration += 1
+    if (verifyProc.running) verifyProc.running = false
+    actionStatus = ""
+
     if (engineMissing || enginePath === "") {
-      inspectResult = null
+      queuedInspect = null
       inspectError = "The anubis engine is not installed."
       return
     }
-    if (inspectProc.running) inspectProc.running = false
-    inspectResult = null
-    inspectError = ""
+
+    // Process termination is asynchronous. Park the newest request and start
+    // it only after the old child's exit is observed; changing the visible
+    // path while the old output is still in flight can otherwise bind that
+    // output to the new file.
+    if (inspectProc.running) {
+      inspectProc.running = false
+      return
+    }
+    launchQueuedInspect()
+  }
+
+  function launchQueuedInspect() {
+    if (inspectProc.running || !queuedInspect) return
+    var request = queuedInspect
+    queuedInspect = null
+    inspectProc.target = String(request.path || "")
+    inspectProc.generation = Number(request.generation || 0)
     inspectProc.outText = ""
     inspectProc.errText = ""
-    inspectProc.command = [enginePath, "inspect", "--json", p]
+    inspectProc.command = [enginePath, "inspect", "--json", inspectProc.target]
     inspectProc.running = true
   }
 
   function clearInspect() {
+    inspectGeneration += 1
+    queuedInspect = null
+    if (inspectProc.running) inspectProc.running = false
+    verifyGeneration += 1
+    if (verifyProc.running) verifyProc.running = false
     inspectPath = ""
     inspectResult = null
     inspectError = ""
+    actionStatus = ""
   }
 
-  function applyInspect(raw, stderrText, exitCode) {
+  function applyInspect(raw, stderrText, exitCode, target, generation) {
+    if (!Model.runIsCurrent(generation, target,
+                            inspectGeneration, inspectPath)) return
+
     var parsed = null
+    var parsedCount = 0
+    var reportedError = ""
+    var protocolValid = true
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).replace(/^\s+|\s+$/g, "") === "") continue
       var o = Model.parseLine(lines[i])
-      if (o && o.kind === "inspect") parsed = o
+      if (o && o.kind === "inspect") {
+        parsed = o
+        parsedCount += 1
+      }
       else if (o && o.kind === "result" && o.ok === false)
-        inspectError = String(o.error || "inspect failed")
+        reportedError = String(o.error || "inspect failed")
+      else protocolValid = false
     }
-    if (parsed) {
+
+    if (Model.inspectRecordAccepted(parsed, exitCode, protocolValid,
+                                    parsedCount, reportedError, target)) {
       inspectResult = parsed
-      if (inspectError === "" && exitCode !== 0)
-        inspectError = "anubis exited " + exitCode
+      reconcileAttestations(target, parsed)
+      if (Model.contentId(parsed) === "")
+        inspectError = "content identity unavailable: this engine did not "
+          + "return a valid content_id, so cached verification and MAC "
+          + "attestations are disabled until it is upgraded"
+      else inspectError = ""
     } else {
       inspectResult = null
-      if (inspectError === "")
-        inspectError = stderrText !== "" ? stderrText
+      reconcileAttestations(target, null)
+      inspectError = reportedError !== "" ? reportedError
+        : (stderrText !== "" ? stderrText
+          : (exitCode !== 0 ? "anubis inspect exited " + exitCode
           : "not an ANUBIS container, or the header could not be read"
+          ))
     }
   }
 
@@ -531,17 +740,27 @@ Item {
   function applyBookResult(raw, stderrText, exitCode) {
     var ok = false
     var err = ""
+    var resultCount = 0
+    var protocolValid = true
     var lines = String(raw || "").split("\n")
     for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).replace(/^\s+|\s+$/g, "") === "") continue
       var o = Model.parseLine(lines[i])
-      if (!o || o.kind !== "result") continue
+      if (!o || o.kind !== "result"
+          || (o.ok !== true && o.ok !== false)) {
+        protocolValid = false
+        continue
+      }
+      resultCount += 1
       ok = o.ok === true
       if (!ok) err = String(o.error || "the engine refused the change")
     }
+    ok = exitCode === 0 && protocolValid && resultCount === 1 && ok
     actionStatus = ""
     if (!ok && err === "")
       err = stderrText !== "" ? stderrText
-        : "anubis exited " + exitCode + " without a result record"
+        : "anubis exited " + exitCode
+          + " without exactly one complete result record"
     actionError = ok ? "" : err
     refresh()
   }
@@ -625,6 +844,8 @@ Item {
 
   Process {
     id: inspectProc
+    property string target: ""
+    property int generation: 0
     property string outText: ""
     property string errText: ""
     command: ["/usr/bin/true"]
@@ -638,13 +859,18 @@ Item {
     }
     onExited: function (code) {
       root.applyInspect(inspectProc.outText,
-                        inspectProc.errText.replace(/^\s+|\s+$/g, ""), code)
+                        inspectProc.errText.replace(/^\s+|\s+$/g, ""), code,
+                        inspectProc.target, inspectProc.generation)
+      root.launchQueuedInspect()
     }
   }
 
   Process {
     id: verifyProc
     property string target: ""
+    property int generation: 0
+    property string expectedContentId: ""
+    property string expectedSigner: ""
     property string outText: ""
     property string errText: ""
     command: ["/usr/bin/true"]
@@ -658,7 +884,10 @@ Item {
     }
     onExited: function (code) {
       root.applyVerify(verifyProc.outText,
-                       verifyProc.errText.replace(/^\s+|\s+$/g, ""), code)
+                       verifyProc.errText.replace(/^\s+|\s+$/g, ""), code,
+                       verifyProc.target, verifyProc.generation,
+                       verifyProc.expectedContentId,
+                       verifyProc.expectedSigner)
     }
   }
 
@@ -678,15 +907,25 @@ Item {
     }
     onExited: function (code) {
       var made = null
+      var madeCount = 0
+      var recordCount = 0
+      var protocolValid = true
       var lines = keygenProc.outText.split("\n")
       for (var i = 0; i < lines.length; i++) {
+        if (String(lines[i]).replace(/^\s+|\s+$/g, "") === "") continue
+        recordCount += 1
         var o = Model.parseLine(lines[i])
-        if (o && o.kind === "keygen") made = o
+        if (o && o.kind === "keygen") {
+          made = o
+          madeCount += 1
+        }
         else if (o && o.kind === "result" && o.ok === false)
           root.actionError = String(o.error || "keygen failed")
+        else protocolValid = false
       }
       root.actionStatus = ""
-      if (made) {
+      if (code === 0 && protocolValid && recordCount === 1
+          && made && madeCount === 1) {
         root.actionError = ""
         root.identityCreated(String(made.name || keygenProc.wanted))
       } else if (root.actionError === "") {

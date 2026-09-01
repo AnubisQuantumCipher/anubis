@@ -27,6 +27,12 @@ public:
   // whatever the pipe produced and carry no meaning.
   virtual void feed(const QString& chunk) = 0;
 
+  // Called exactly once before a new child is started. Stream objects live as
+  // long as their QML component, while a Process can be launched many times;
+  // making reset part of the interface prevents one run's bytes from being
+  // presented as the next run's answer.
+  virtual void reset() = 0;
+
   // Called exactly once, when the stream is at EOF.
   virtual void finish() = 0;
 };
@@ -49,6 +55,7 @@ public:
 
   [[nodiscard]] QString text() const { return mText; }
 
+  void reset() override;
   void feed(const QString& chunk) override;
   void finish() override;
 
@@ -74,6 +81,7 @@ public:
   [[nodiscard]] QString splitMarker() const { return mMarker; }
   void setSplitMarker(const QString& marker);
 
+  void reset() override;
   void feed(const QString& chunk) override;
   void finish() override;
 

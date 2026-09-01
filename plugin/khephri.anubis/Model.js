@@ -567,6 +567,34 @@ function parseLine(line) {
   } catch (e) { return null }
 }
 
+// Status is a machine protocol. A partial object must never be enough to make
+// the bar claim the vault is healthy, so all fields the readout depends on are
+// mandatory and type checked before the record reaches panelState().
+function validStatusRecord(o) {
+  if (!o || o.kind !== "status") return false
+  if (typeof o.version !== "string" || o.version === "") return false
+  if (typeof o.generated !== "string" || o.generated === "") return false
+  if (!Array.isArray(o.identities) || !Array.isArray(o.recipients)
+      || !Array.isArray(o.recent)) return false
+  var s = o.suite
+  if (!s || typeof s !== "object") return false
+  if (typeof s.kem !== "string" || s.kem === "") return false
+  if (typeof s.sig !== "string" || s.sig === "") return false
+  if (typeof s.aead !== "string" || s.aead === "") return false
+  if (typeof s.kdf !== "string" || s.kdf === "") return false
+  if (typeof s.format !== "string" || s.format === "") return false
+  if (typeof s.pure_rust !== "boolean" || !Array.isArray(s.fips)) return false
+  var c = o.counts
+  if (!c || typeof c !== "object") return false
+  var names = ["encrypt", "decrypt", "failed"]
+  for (var i = 0; i < names.length; i++) {
+    var value = c[names[i]]
+    if (typeof value !== "number" || !isFinite(value) || value < 0)
+      return false
+  }
+  return true
+}
+
 // ------------------------------------------------------------- inspector
 
 function stanzaRows(inspect) {

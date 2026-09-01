@@ -206,6 +206,18 @@ container, and says when the check ran. The claim is about a check that
 happened, not about the file's general trustworthiness. It is session state and
 is never persisted.
 
+“Exact container” means a `content_id`: SHA-512 over every decoded binary byte,
+including the signature trailer. Inspect, verify, and decrypt return the same
+ID for the same bytes. Attestations are indexed by that ID, never by pathname,
+and a signature attestation additionally retains the signer fingerprint. An
+older engine that omits or malforms the ID may still supply header metadata,
+but the Vault shows an upgrade notice and refuses to promote a cached verdict.
+
+When an already verified container is decrypted, the Vault passes both its
+signer and `content_id` back to the engine. The engine re-checks them before
+publishing plaintext, so replacing the path after inspection—even with a
+different valid container from the same signer—fails closed.
+
 ## Settings
 
 <img src="../docs/screenshots/settings.png" alt="The settings sheet: engine and surface options, and the SHORTCUTS legend" width="560" align="right">
@@ -254,7 +266,9 @@ anubis keygen    --json --name <NAME>
 anubis inspect   --json <FILE>
 anubis verify    --json [--signer <FINGERPRINT>] <FILE>
 anubis encrypt   --json -r <KEY> [-r ...] [--sign] [--identity <NAME>] -o <OUT> [--force] <INPUT>
-anubis decrypt   --json [--identity <NAME>] -o <OUT> [--force] <INPUT>
+anubis decrypt   --json [--identity <NAME>] [--require-signature]
+                 [--signer <FINGERPRINT>] [--expect-content-id <SHA512_HEX>]
+                 -o <OUT> [--force] <INPUT>
 anubis recipient list   --json
 anubis recipient add    --json --label <LABEL> <KEY>
 anubis recipient remove --json --label <LABEL>
@@ -264,6 +278,12 @@ Encrypt and decrypt stream zero or more `{"kind":"progress"}` records and then
 exactly one `{"kind":"result"}`. Progress is throttled to roughly one record per
 4 MiB, so small files emit none at all — the bar shows an indeterminate sweep
 labelled `working` rather than claiming a percentage the engine never reported.
+
+The process exit status and the structured record must both report success.
+An exit without exactly one complete result is a failure, even when its numeric
+exit code is zero. Stream collectors and partial-line parsers are reset before
+every launch, and cancelled inspections are generation-bound and queued until
+the previous child has actually exited.
 
 The address book is read and written only through the engine, so there is one
 parser and no write race with a concurrent CLI invocation.

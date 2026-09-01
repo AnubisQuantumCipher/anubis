@@ -24,8 +24,11 @@ pub mod stream;
 
 pub use error::{Error, Result};
 pub use format::{
-    Decrypted, EncryptOptions, Header, Inspection, Verification, decrypt, encrypt, inspect, verify,
-    verify_unsized, verify_with_progress,
+    ContentId, Decrypted, DecryptionReport, EncryptOptions, Header, Inspection, InspectionReport,
+    Verification, VerificationReport, decrypt, decrypt_provisional, decrypt_report,
+    decrypt_unsized, decrypt_unsized_provisional, decrypt_unsized_report, encrypt, inspect,
+    inspect_unsized, inspect_with_content_id, verify, verify_report, verify_report_with_progress,
+    verify_unsized, verify_unsized_report, verify_with_progress,
 };
 pub use keys::{Identity, Recipient, fingerprint};
 
