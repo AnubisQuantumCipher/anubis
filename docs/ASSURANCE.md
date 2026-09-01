@@ -36,9 +36,11 @@ and [CAVP](https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Pro
 Implementing a standardized algorithm is not the same as using a validated
 module. Passing local vectors is not CAVP validation. Formal verification is
 not a substitute for the external process that the CMVP definition requires.
-Under a permanent “no accredited laboratory” constraint, the strongest honest
-future claim is an **approved-algorithm candidate with machine-checked stated
-properties**, not “FIPS validated.”
+The project is now pursuing that external path through the controlled
+[CMVP readiness package](cmvp/README.md). Until an accredited laboratory tests
+the exact module and CMVP issues a certificate, the strongest honest claim is
+an **approved-algorithm candidate with machine-checked stated properties**, not
+“FIPS validated.”
 
 ## v3 algorithm profile
 
@@ -181,22 +183,27 @@ the reserved `anubis-encryption.org/v4` token and refuses it before loading v3
 identities or creating plaintext staging. A v4 write request cannot yield a v3
 permit. The isolated crate exports no production suite value, parser, writer,
 cryptographic operation, backend dependency, or provider-supplied validation
-status; its startup capability exists only for fake-provider boundary tests.
+status. Its fake-provider tests now exercise pre-operational, self-testing,
+operational, latched error, on-demand test, and explicit zeroization-result
+transitions. No cryptographic service is exposed.
 
-The still-non-normative algorithm target includes ML-KEM-1024, ML-DSA-87,
-AES-256-GCM payload protection, an approved AES key-wrap construction, and
-applicable approved hash/MAC/KDF/RBG functions. The classical contribution,
-approved combiner, KDF/key-wrap profiles, provider-owned IV generation, encoded
-nonce/AAD/transcript, and final-record rules remain specification gates. In
-particular, no counter-derived nonce rule or provider has been frozen by the
-foundation code.
+The proposed lowest-risk first-certification target is ML-KEM-1024 Scenario 1,
+ML-DSA-87, AES-256-GCM payload protection, AES-256-KW file-key wrapping,
+HMAC_DRBG/SHA2-512, and the applicable SHA2/SHA3/SHAKE/HMAC prerequisites.
+Direct KEM-key use, key wrap, provider-owned IV generation, entropy/ESV route,
+encoded AAD/transcript, signature interface, final-record rules, integrity
+mechanism, and exact ACVP registrations remain CST-laboratory architecture
+gates. No provider or production suite has been frozen.
 
 The current [FIPS 140-3 Implementation Guidance](https://csrc.nist.gov/csrc/media/Projects/cryptographic-module-validation-program/documents/fips%20140-3/FIPS%20140-3%20IG.pdf)
 permits a predefined ML-KEM hybrid to include a non-approved but allowed
-classical component only under specific module-owned constraints. The candidate
-core must therefore own the complete fixed hybrid service; an application that
+classical component only under specific module-owned constraints. ML-KEM-only
+is a deliberate first-certificate scope reduction, not a FIPS requirement to
+remove X25519. If a later v4 design selects the classical hedge, the candidate
+core must own the complete fixed hybrid service; an application that
 independently calls unrelated X25519, ML-KEM, and HKDF services is not the same
-boundary. Relevant construction sources include
+boundary. The decision and test inventory are in
+[cmvp/ALGORITHM-PROFILE.md](cmvp/ALGORITHM-PROFILE.md). Relevant sources include
 [SP 800-227](https://csrc.nist.gov/pubs/sp/800/227/final),
 [SP 800-56C Rev. 2](https://csrc.nist.gov/pubs/sp/800/56/c/r2/final),
 [SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final), and

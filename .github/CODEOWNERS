@@ -1,0 +1,7 @@
+# Certificate-claim and candidate-module changes require explicit owner review.
+* @AnubisQuantumCipher
+/.github/workflows/ci.yml @AnubisQuantumCipher
+/scripts/check-cmvp-status.py @AnubisQuantumCipher
+/docs/cmvp/ @AnubisQuantumCipher
+/crates/anubis-cli/src/main.rs @AnubisQuantumCipher
+/crates/anubis-v4-core/ @AnubisQuantumCipher

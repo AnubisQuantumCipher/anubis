@@ -367,11 +367,12 @@ the last valid compact bundle.
 
 ## Open Decisions
 
-- Final crate versus module boundary for the v4 core.
-- Approved classical key-establishment choice or explicitly auxiliary X25519
-  treatment in the fixed hybrid profile.
-- Exact approved KDF and key-wrap profiles and provider implementation strategy.
+- CST-laboratory confirmation of the proposed versioned shared-library boundary.
+- CST-laboratory confirmation of the first-certificate ML-KEM-only Scenario 1
+  profile; a fixed X25519 hybrid remains a deliberate higher-scope alternative.
+- Exact provider, direct KEM-key use, AES-KW profile, and ACVP adapter strategy.
 - Normative AES-GCM nonce, chunking, AAD, transcript, and final-record rules.
+- Exact DRBG/entropy/ESV, module-integrity, signature, and tested-OE profiles.
 - Operator values for free-space, scratch, retained-evidence, benchmark, and CI
   retention thresholds.
 - Formal toolchain beyond Kani for protocol-level and refinement obligations.
@@ -379,6 +380,8 @@ the last valid compact bundle.
   ownership.
 - Opt-in release and default-change criteria.
 - Long-term v3 writer support policy.
-- Whether the project will ever pursue external CAVP/CMVP validation. If it will
-  not, the terminal release language remains “candidate algorithms plus
-  machine-checked stated properties,” never “validated.”
+
+External CAVP/CMVP validation is now the selected outcome. The controlled
+readiness register, proposed boundary/profile, and CST-laboratory RFQ are in
+[`docs/cmvp/`](../../../cmvp/README.md). Validation language remains false
+until CMVP issues the exact certificate.

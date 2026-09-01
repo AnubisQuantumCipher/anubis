@@ -44,6 +44,12 @@ TestCase {
     verify(!PluginModel.validStatusRecord(status))
   }
 
+  function test_currentStatusRendersExplicitNonValidation() {
+    var status = completeStatus()
+    compare(PluginModel.fipsChips(status.suite).join("|"),
+            "NIST FIPS 203|NIST FIPS 204|PQ CATEGORY 5|NOT FIPS 140-3 VALIDATED")
+  }
+
   function test_legacyStatusIsReadyWithUnstatedAssurance() {
     var status = completeStatus()
     delete status.status_schema

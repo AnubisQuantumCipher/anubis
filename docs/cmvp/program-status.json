@@ -1,0 +1,23 @@
+{
+  "schema": "anubis.cmvp-precertificate-status.v1",
+  "as_of": "2026-09-01",
+  "module": {
+    "name": "ANUBIS v4 Cryptographic Module",
+    "version": null,
+    "type": "software",
+    "target_security_level": 1,
+    "source_boundary": "crates/anubis-v4-core"
+  },
+  "program": {
+    "phase": "pre-submission",
+    "cstl": null,
+    "test_id": null,
+    "cavp_certificates": [],
+    "cmvp_certificate": null
+  },
+  "claims": {
+    "approved_mode_available": false,
+    "fips_140_3_validated": false
+  },
+  "next_external_gate": "Execute a statement of work with an NVLAP-accredited CST laboratory for architecture review, ACVTS testing, and a FIPS 140-3 Full Submission."
+}

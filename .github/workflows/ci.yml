@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 env:
@@ -17,8 +18,20 @@ permissions:
   contents: read
 
 jobs:
+  cmvp-claims:
+    name: CMVP certificate claim gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Refuse premature certificate claims
+        run: |
+          python3 -I -S scripts/check-cmvp-status.py --self-test
+          python3 -I -S scripts/check-cmvp-status.py docs/cmvp/program-status.json
+
   engine:
     name: engine (${{ matrix.os }})
+    needs: cmvp-claims
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -47,6 +60,18 @@ jobs:
 
       - name: Test
         run: cargo test --locked --workspace --all-features --release
+
+      - name: Runtime certificate claim gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ANUBIS_CLAIM_ROOT=$(mktemp -d)
+          readonly ANUBIS_CLAIM_ROOT
+          trap 'case "$ANUBIS_CLAIM_ROOT" in /tmp/*) find "$ANUBIS_CLAIM_ROOT" -xdev -depth -delete ;; *) exit 1 ;; esac' EXIT
+          env HOME="$ANUBIS_CLAIM_ROOT" target/release/anubis status --json \
+            | python3 -I -S scripts/check-cmvp-status.py --runtime-status -
+          env HOME="$ANUBIS_CLAIM_ROOT" target/release/anubis status \
+            | python3 -I -S scripts/check-cmvp-status.py --runtime-human -
 
       # The point of the whole exercise: a signature must be checkable by
       # someone holding no key at all. If that ever stops being true, it stops

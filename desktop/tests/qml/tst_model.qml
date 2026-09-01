@@ -56,6 +56,12 @@ TestCase {
     verify(!Model.validStatusRecord(unknownSchema))
   }
 
+  function test_currentStatusRendersExplicitNonValidation() {
+    var status = completeStatus()
+    compare(Model.fipsChips(status.suite).join("|"),
+            "NIST FIPS 203|NIST FIPS 204|PQ CATEGORY 5|NOT FIPS 140-3 VALIDATED")
+  }
+
   function test_legacyStatusRemainsUsableButAssuranceIsNotStated() {
     var legacy = completeStatus()
     delete legacy.status_schema

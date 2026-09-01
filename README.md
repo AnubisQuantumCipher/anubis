@@ -9,6 +9,12 @@ CMVP certificate, and has no approved-only mode. See the
 [claim and formal-evidence ledger](docs/ASSURANCE.md) before repeating a FIPS
 or proof claim.
 
+**Validation program:** a real Security Level 1 software-module path is now
+tracked in [docs/cmvp/](docs/cmvp/README.md), including the current official
+source snapshot, requirement gaps, candidate boundary, algorithm profile, and
+laboratory RFQ. Its machine-readable status remains pre-submission and rejects
+any certificate claim.
+
 **Zero system dependencies -- no liboqs, no OpenSSL, no cmake.** Every
 cryptographic primitive is a pure-Rust implementation, so `cargo install` works
 on a stock Arch or Omarchy system with nothing but a Rust toolchain.
@@ -637,13 +643,17 @@ ANUBIS is not validated at any FIPS 140-3 level. Storage-guarded Kani model
 checks now gate specific header-line policy, arithmetic, nonce, armor-policy,
 and plaintext-publication properties, but their scope and non-claims are part
 of the result. The complete ledger and additive approved-algorithm v4 plan are in
-[`docs/ASSURANCE.md`](docs/ASSURANCE.md).
+[`docs/ASSURANCE.md`](docs/ASSURANCE.md). The separate
+[CMVP readiness package](docs/cmvp/README.md) identifies every current local
+and external validation gate.
 
 **V4 is a fail-closed foundation, not an encryption mode.** The exact outer
 dispatcher recognizes the reserved v4 token without routing it to v3, and the
 CLI refuses it before v3 identity access or plaintext staging. The isolated v4
 core intentionally has no production suite, parser, writer, crypto backend, or
-validation claim while its normative protocol decisions remain open.
+validation claim. It now owns a pre-operational/self-test/operational/latched
+error scaffold and explicit zeroization result; those are lifecycle controls,
+not working cryptography or conformance evidence.
 
 **The hybrid rationale.** An attacker must break both X25519 and ML-KEM-1024.
 Neither half is trusted alone: X25519 covers the possibility that the newer
@@ -770,6 +780,7 @@ Layout:
 crates/anubis-crypto/    library: format, primitives, key handling
 crates/anubis-cli/       binary `anubis`
 crates/anubis-v4-core/   inert v4 suite/provider boundary; no production crypto
+docs/cmvp/               FIPS 140-3 readiness, boundary, sources, and lab RFQ
 docs/FORMAT.md           wire format specification
 docs/ASSURANCE.md        NIST/FIPS claim ledger and formal-evidence boundary
 docs/VERIFYING.md        checking a signature without trusting this software
