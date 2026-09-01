@@ -85,8 +85,12 @@ Item {
 
   // ---- console state -------------------------------------------------------
   property string targetPath: ""
+  property bool pathEditPending: false
+  property bool syncingPathField: false
   property var selection: []          // recipient keys chosen for encryption
   property bool signRequested: false
+  property bool requireDecryptSignature: false
+  property string expectedDecryptSigner: ""
   property string chosenIdentity: ""
   property string newIdentityName: ""
   property string newRecipientLabel: ""
@@ -100,6 +104,9 @@ Item {
   readonly property var selectedKeys:
     Model.selectedKeys(anubis.status, selection)
   readonly property bool targetIsVault: Model.isVaultFile(targetPath)
+  readonly property var currentDecryptPolicy:
+    anubis.decryptPolicyForPath(targetPath, requireDecryptSignature,
+                                expectedDecryptSigner)
 
   readonly property string vaultState:
     Model.panelState(anubis.engineMissing, anubis.status, anubis.statusError)
@@ -123,9 +130,9 @@ Item {
     showAbout = false
     anubis.actionError = ""
     anubis.opError = ""
-    anubis.cancelPending()
+    if (anubis.pendingOverwrite) anubis.cancelPending()
 
-    var target = App.pathFromUrl(String(path || ""))
+    var target = Model.exactPath(path)
     if (target !== "") selectPath(target)
     if (anubis.enginePath === "") anubis.probeEngine()
     else anubis.refresh()
@@ -175,10 +182,28 @@ Item {
   // console actions
   // ==========================================================================
 
-  function selectPath(raw) {
-    var p = Model.normalizePath(raw, home)
+  // Structured paths are exact. Only the explicitly free-form text entry and
+  // a plain-text drop use normalizePath's quote/URL/tilde conveniences.
+  function selectPath(path) {
+    var p = Model.exactPath(path)
+    if (anubis.pendingOverwrite) anubis.cancelPending()
+    pathSettle.stop()
+    pathEditPending = false
+    syncingPathField = true
     pathField.text = p
+    syncingPathField = false
     targetPath = p
+  }
+
+  function selectFreeFormPath(raw) {
+    selectPath(Model.normalizePath(raw, home))
+  }
+
+  function commitPathEdit() {
+    var input = Model.pathForAction(targetPath, pathField.text,
+                                    pathEditPending, home)
+    if (pathEditPending) selectPath(input)
+    return input
   }
 
   onTargetPathChanged: {
@@ -192,15 +217,19 @@ Item {
   }
 
   function runEncrypt() {
+    var input = commitPathEdit()
     focusRequest = "encrypt"
-    anubis.submit(anubis.buildRequest("encrypt", targetPath, selectedKeys,
+    anubis.submit(anubis.buildRequest("encrypt", input, selectedKeys,
                                       signRequested, effectiveIdentity, ""))
   }
 
   function runDecrypt() {
+    var input = commitPathEdit()
     focusRequest = "decrypt"
-    anubis.submit(anubis.buildRequest("decrypt", targetPath, [], false,
-                                      effectiveIdentity, ""))
+    anubis.submit(anubis.buildRequest("decrypt", input, [], false,
+                                      effectiveIdentity, "",
+                                      requireDecryptSignature,
+                                      expectedDecryptSigner))
   }
 
   // Tone names come from Model; the palette lives here. "notice" is
@@ -237,7 +266,7 @@ Item {
     id: pathSettle
     interval: 350
     repeat: false
-    onTriggered: root.targetPath = Model.normalizePath(pathField.text, root.home)
+    onTriggered: root.commitPathEdit()
   }
 
   Timer {
@@ -2015,9 +2044,13 @@ Item {
                     placeholderText: "/path/to/file"
                     font.pixelSize: root.typeBody
                     verticalPadding: root.padLine
-                    onTextChanged: pathSettle.restart()
-                    onAccepted: root.targetPath =
-                      Model.normalizePath(text, root.home)
+                    onTextChanged: {
+                      if (root.syncingPathField) return
+                      if (anubis.pendingOverwrite) anubis.cancelPending()
+                      root.pathEditPending = true
+                      pathSettle.restart()
+                    }
+                    onAccepted: root.commitPathEdit()
                   }
                   Item {
                     width: dropCol.width
@@ -2052,8 +2085,8 @@ Item {
                   keys: ["text/uri-list"]
                   onDropped: function (drop) {
                     if (drop.hasUrls && drop.urls.length > 0)
-                      root.selectPath(String(drop.urls[0]))
-                    else if (drop.hasText) root.selectPath(drop.text)
+                      root.selectPath(App.pathFromUrl(String(drop.urls[0])))
+                    else if (drop.hasText) root.selectFreeFormPath(drop.text)
                     drop.accept()
                   }
                 }
@@ -2225,6 +2258,99 @@ Item {
                 }
               }
 
+              Rectangle {
+                width: parent.width
+                visible: root.targetIsVault
+                  || (anubis.inspectPath !== ""
+                      && anubis.inspectPath === root.targetPath)
+                implicitHeight: decryptPolicyCol.implicitHeight
+                  + (root.padCard * 2)
+                radius: Style.cornerRadius
+                color: Qt.alpha(root.fg, 0.03)
+                border.color: Qt.alpha(root.fg, 0.14)
+                border.width: 1
+
+                Column {
+                  id: decryptPolicyCol
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: root.padCard
+                  spacing: root.padGroup
+
+                  Item {
+                    width: decryptPolicyCol.width
+                    height: Math.max(requireSignatureButton.height,
+                                     decryptPolicyNote.implicitHeight)
+
+                    ActionButton {
+                      id: requireSignatureButton
+                      anchors.left: parent.left
+                      label: root.requireDecryptSignature
+                        ? "signature required" : "signature optional"
+                      glyph: root.requireDecryptSignature
+                        ? Model.GLYPH.shieldCheck : Model.GLYPH.shield
+                      primary: root.requireDecryptSignature
+                      onActivated: {
+                        if (anubis.pendingOverwrite) anubis.cancelPending()
+                        root.requireDecryptSignature =
+                          !root.requireDecryptSignature
+                        if (!root.requireDecryptSignature)
+                          root.expectedDecryptSigner = ""
+                      }
+                    }
+
+                    Meta {
+                      id: decryptPolicyNote
+                      anchors.left: requireSignatureButton.right
+                      anchors.leftMargin: root.padCard
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      horizontalAlignment: Text.AlignRight
+                      wrapMode: Text.WordWrap
+                      text: "decrypt is always pinned to the inspected "
+                        + "content ID"
+                      color: Qt.alpha(root.fg, 0.45)
+                    }
+                  }
+
+                  InputField {
+                    id: expectedSignerField
+                    width: decryptPolicyCol.width
+                    visible: root.requireDecryptSignature
+                    text: root.expectedDecryptSigner
+                    placeholderText: "optional expected signing fingerprint"
+                    font.pixelSize: root.typeBody
+                    verticalPadding: root.padLine
+                    onTextChanged: {
+                      if (root.expectedDecryptSigner === text) return
+                      if (anubis.pendingOverwrite) anubis.cancelPending()
+                      root.expectedDecryptSigner = text
+                    }
+                  }
+
+                  Meta {
+                    width: decryptPolicyCol.width
+                    wrapMode: Text.WordWrap
+                    visible: anubis.inspectBusy
+                      || !root.currentDecryptPolicy.ok
+                      || root.requireDecryptSignature
+                    text: anubis.inspectBusy
+                      ? "Inspecting current bytes before decrypt is enabled."
+                      : (!root.currentDecryptPolicy.ok
+                         ? root.currentDecryptPolicy.error
+                         : (root.currentDecryptPolicy.signer !== ""
+                            ? "Decrypt will require signature from "
+                              + root.currentDecryptPolicy.signer + "."
+                            : "Decrypt will refuse an unsigned container; "
+                              + "leave the fingerprint empty to accept any "
+                              + "valid signer."))
+                    color: Qt.alpha(root.fg,
+                                    root.currentDecryptPolicy.ok ? 0.45 : 0.6)
+                  }
+                }
+              }
+
               // Confirmation surface: fingerprints, never truncated keys.
               Column {
                 width: parent.width
@@ -2254,7 +2380,8 @@ Item {
                   label: "Encrypt"
                   primary: root.focusRequest !== "decrypt"
                   available: !anubis.engineMissing && !anubis.opBusy
-                    && root.targetPath !== "" && root.selectedKeys.length > 0
+                    && !root.pathEditPending && root.targetPath !== ""
+                    && root.selectedKeys.length > 0
                   onActivated: root.runEncrypt()
                 }
                 ActionButton {
@@ -2262,14 +2389,15 @@ Item {
                   label: "Decrypt"
                   primary: root.focusRequest === "decrypt"
                   available: !anubis.engineMissing && !anubis.opBusy
-                    && root.targetPath !== ""
+                    && !root.pathEditPending && root.targetPath !== ""
+                    && root.currentDecryptPolicy.ok
                   onActivated: root.runDecrypt()
                 }
                 ActionButton {
                   glyph: Model.GLYPH.eye
                   label: "Inspect"
-                  available: !anubis.engineMissing && root.targetPath !== ""
-                    && !anubis.inspectBusy
+                  available: !anubis.engineMissing && !root.pathEditPending
+                    && root.targetPath !== "" && !anubis.inspectBusy
                   onActivated: anubis.runInspect(root.targetPath)
                 }
                 ActionButton {
@@ -2314,6 +2442,7 @@ Item {
                     ActionButton {
                       label: "overwrite it"
                       tone: root.urgent
+                      available: !root.pathEditPending
                       onActivated: anubis.confirmPending()
                     }
                     ActionButton {
@@ -2637,13 +2766,10 @@ Item {
                                                 sigPanel.attested)
                   readonly property string paintTone:
                     sigPanel.sigTone === "none" ? "neutral" : sigPanel.sigTone
-                  readonly property string signerFp:
-                    Model.signerFingerprint(anubis.inspectResult)
-                  // Compared ONLY against each identity's signing_fingerprint.
-                  // A recipient fingerprint is a different hash of a different
-                  // key and comparing the two would manufacture a falsehood.
-                  readonly property var signer:
-                    Model.signedByIdentity(anubis.status, anubis.inspectResult)
+                  readonly property var attribution:
+                    Model.signerAttribution(anubis.status,
+                                            anubis.inspectResult,
+                                            sigPanel.attested)
                   width: (parent.width - root.padCard) / 2
                   implicitHeight: sigCol.implicitHeight + (root.padCard * 2)
                   height: implicitHeight
@@ -2676,22 +2802,13 @@ Item {
                     Mono {
                       width: sigCol.width
                       wrapMode: Text.WordWrap
-                      // Attribution keys off whether a signer fingerprint
-                      // EXISTS, never off whether the signature has been
-                      // checked. Keying it on tone once made an unverified
-                      // signature report "no signature to attribute", which
-                      // is simply false: there is a signer, it just has not
-                      // been verified yet.
-                      text: sigPanel.signer
-                        ? "signed by your identity \""
-                          + sigPanel.signer.name + "\""
-                        : (sigPanel.signerFp !== ""
-                           ? "signer is not an identity in this vault -- "
-                             + "check the fingerprint out of band before "
-                             + "trusting it"
-                           : "no signature to attribute")
-                      color: sigPanel.signer ? Qt.alpha(root.accent, 0.85)
-                                             : Qt.alpha(root.fg, 0.5)
+                      // Matching a header field to a local key identifies the
+                      // claim, not its author. Only a signature verification
+                      // over this content ID earns authorship wording.
+                      text: sigPanel.attribution.text
+                      color: sigPanel.attribution.verified
+                        ? Qt.alpha(root.accent, 0.85)
+                        : Qt.alpha(root.fg, 0.5)
                     }
                     Mono {
                       width: sigCol.width
@@ -2703,8 +2820,8 @@ Item {
                     Mono {
                       width: sigCol.width
                       wrapMode: Text.WordWrap
-                      text: "A signature says who wrote the file. The header "
-                        + "MAC does not."
+                      text: "A verified signature attributes these bytes to "
+                        + "a signing key. The header MAC does not."
                       color: Qt.alpha(root.fg, 0.32)
                     }
                     // Offered only while there is something to check and no

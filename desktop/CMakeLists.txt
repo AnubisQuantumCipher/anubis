@@ -25,6 +25,8 @@ qt_add_executable(anubis-desktop
   src/datastream.hpp
   src/fileview.cpp
   src/fileview.hpp
+  src/openrequest.cpp
+  src/openrequest.hpp
   src/process.cpp
   src/process.hpp
 )
@@ -88,6 +90,10 @@ if(BUILD_TESTING)
     tests/process_lifecycle_test.cpp
     src/datastream.cpp
     src/datastream.hpp
+    src/fileview.cpp
+    src/fileview.hpp
+    src/openrequest.cpp
+    src/openrequest.hpp
     src/process.cpp
     src/process.hpp
   )

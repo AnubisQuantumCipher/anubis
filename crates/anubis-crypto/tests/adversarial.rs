@@ -1211,6 +1211,94 @@ fn legacy_stanza_and_version_lines_are_refused_specifically() {
 }
 
 #[test]
+fn candidate_v4_version_is_disjoint_and_never_falls_back_to_v3() {
+    fn assert_v4_refusal(error: Error, path: &str) {
+        match error {
+            Error::Unsupported(message) => {
+                assert!(
+                    message.contains("ANUBIS/v4 candidate file"),
+                    "{path}: {message}"
+                );
+                assert!(
+                    message.contains("refusing to reinterpret it as ANUBIS/v3"),
+                    "{path}: downgrade refusal was not explicit: {message}"
+                );
+            }
+            other => panic!("{path}: expected an explicit v4 refusal, got {other}"),
+        }
+    }
+
+    let id = Identity::generate().unwrap();
+    let file = format!("{}\n-> whatever\n", format::CANDIDATE_V4_MAGIC).into_bytes();
+
+    let header_error = match Header::parse(&mut &file[..]) {
+        Ok(_) => panic!("Header::parse accepted the reserved v4 token"),
+        Err(error) => error,
+    };
+    assert_v4_refusal(header_error, "Header::parse");
+
+    for (path, result) in [
+        (
+            "inspect",
+            format::inspect(&file[..], file.len() as u64).map(|_| ()),
+        ),
+        (
+            "inspect_unsized",
+            format::inspect_unsized(&file[..]).map(|_| ()),
+        ),
+        (
+            "verify",
+            format::verify(&file[..], file.len() as u64).map(|_| ()),
+        ),
+        (
+            "verify_unsized",
+            format::verify_unsized(&file[..]).map(|_| ()),
+        ),
+    ] {
+        match result {
+            Ok(()) => panic!("{path} accepted the reserved v4 token"),
+            Err(error) => assert_v4_refusal(error, path),
+        }
+    }
+
+    let mut sized_output = Vec::new();
+    let sized_error = match format::decrypt(
+        std::slice::from_ref(&id),
+        &file[..],
+        file.len() as u64,
+        &mut sized_output,
+        |_| {},
+    ) {
+        Ok(_) => panic!("decrypt accepted the reserved v4 token"),
+        Err(error) => error,
+    };
+    assert_v4_refusal(sized_error, "decrypt");
+    assert!(sized_output.is_empty(), "v4 refusal published plaintext");
+
+    let mut streamed_output = Vec::new();
+    let streamed_error = match format::decrypt_unsized(
+        std::slice::from_ref(&id),
+        &file[..],
+        &mut streamed_output,
+        |_| {},
+    ) {
+        Ok(_) => panic!("decrypt_unsized accepted the reserved v4 token"),
+        Err(error) => error,
+    };
+    assert_v4_refusal(streamed_error, "decrypt_unsized");
+    assert!(
+        streamed_output.is_empty(),
+        "streamed v4 refusal published plaintext"
+    );
+
+    // Prefix matches are exact: longer or otherwise unknown tokens remain
+    // malformed input, never a v4 classification and never v3.
+    let unknown = b"anubis-encryption.org/v40\n-> whatever\n";
+    let error = format::inspect(&unknown[..], unknown.len() as u64).unwrap_err();
+    assert!(matches!(error, Error::Header(_)), "unknown token: {error}");
+}
+
+#[test]
 fn invalid_utf8_in_the_header_errors_without_panicking() {
     let id = Identity::generate().unwrap();
     // A lone 0x80 continuation byte cannot appear in valid UTF-8, and the
@@ -1226,6 +1314,27 @@ fn invalid_utf8_in_the_header_errors_without_panicking() {
     file.extend_from_slice(format!("--- {}\n", b64_zeros(64)).as_bytes());
     let err = must_refuse(&file, &id, "invalid utf-8 magic");
     assert!(matches!(err, Error::Io(_)), "invalid utf-8 magic: {err}");
+}
+
+#[test]
+fn attacker_controlled_header_diagnostics_escape_terminal_controls() {
+    let bad_version = b"anubis-encryption.org/v3\x1b[31m\n";
+    let rendered = format::inspect(&bad_version[..], bad_version.len() as u64)
+        .expect_err("control-bearing version must fail")
+        .to_string();
+    assert!(
+        !rendered.contains('\x1b'),
+        "version diagnostic emitted a raw escape: {rendered:?}"
+    );
+
+    let unexpected = b"anubis-encryption.org/v3\nattacker\x1b[2J\n";
+    let rendered = format::inspect(&unexpected[..], unexpected.len() as u64)
+        .expect_err("unexpected control-bearing line must fail")
+        .to_string();
+    assert!(
+        !rendered.contains('\x1b'),
+        "header diagnostic emitted a raw escape: {rendered:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,12 +1468,13 @@ fn decrypt_unsized_survives_a_choked_reader() {
         assert!(d.verified_key.is_some(), "choked({max}) lost the signer");
     }
 
-    // Multi-chunk, so the trailer split happens after several chunks. Larger
-    // reads only here: the delay window is topped up per outer read, so very
-    // small reads over a large stream cost quadratic memmove.
+    // Multi-chunk, so the trailer split happens after several chunks. A
+    // one-byte producer belongs in this matrix: the reusable refill block must
+    // keep throttled input linear instead of repeatedly zero-filling a large
+    // temporary extension.
     let big = pseudo(2 * CHUNK + 5, 0x2B);
     let sealed = seal(&big, std::slice::from_ref(&r), Some(&id));
-    for max in [4096usize, 65536] {
+    for max in [1usize, 4096, 65536] {
         let (res, out) = open_unsized(choked(&sealed, max), std::slice::from_ref(&id));
         let d = res.unwrap_or_else(|e| panic!("choked({max}) multi-chunk failed: {e}"));
         assert_eq!(out, big, "choked({max}) multi-chunk output");

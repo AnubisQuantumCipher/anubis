@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `~/.config/anubis`
 pub fn config_dir() -> Result<PathBuf> {
@@ -32,24 +32,50 @@ pub fn recipients_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("recipients.toml"))
 }
 
-/// Create the directory tree, keeping secrets at mode 0700.
-pub fn ensure_dirs() -> Result<()> {
-    let ids = identities_dir()?;
-    std::fs::create_dir_all(&ids).with_context(|| format!("creating {}", ids.display()))?;
-    std::fs::create_dir_all(state_dir()?)?;
+fn ensure_private_dir(path: &Path) -> Result<()> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        bail!("refusing symlinked private directory {}", path.display());
+    }
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("checking private directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!("private path is not a real directory: {}", path.display());
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&ids)?.permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&ids, perms)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions)
+            .with_context(|| format!("securing private directory {}", path.display()))?;
     }
     Ok(())
 }
 
+/// Create only the audit-state directory, keeping it private.
+pub fn ensure_state_dir() -> Result<()> {
+    ensure_private_dir(&state_dir()?)
+}
+
+/// Create the complete private directory tree used by identities and audit.
+pub fn ensure_dirs() -> Result<()> {
+    let config = config_dir()?;
+    let identities = config.join("identities");
+    ensure_private_dir(&config)?;
+    ensure_private_dir(&identities)?;
+    ensure_state_dir()
+}
+
 /// Validate a name used as a filename component.
 pub fn check_name(name: &str) -> Result<()> {
+    const SECRET_IDENTITY_PREFIX: &str = "ANUBIS-SECRET-KEY-1";
+    if name.to_ascii_uppercase().contains(SECRET_IDENTITY_PREFIX) {
+        bail!("a secret identity cannot be used as a public name or label");
+    }
     if name.is_empty()
         || !name
             .chars()

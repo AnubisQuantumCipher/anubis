@@ -125,6 +125,53 @@ specifics are:
 - **`--require-signature` and `--signer` were added**, because the format
   cannot prevent a recipient from stripping a signature and nothing existed to
   let a caller insist on one. See section 2.4.
+- **Input geometry now comes from the same open file handle as the bytes.** A
+  pathname replacement between `open` and `metadata` can no longer make the
+  payload/trailer boundary describe a different file. Sized full-container
+  operations also consume to EOF and reject a length mismatch.
+- **Hostile header text is escaped in diagnostics.** Unknown version and stanza
+  lines no longer carry raw terminal control bytes into human-mode errors.
+- **Independent verification no longer needs a second unbounded binary-container copy.**
+  The Python verifier reads a bounded header, streams binary hashing, and scans
+  armored lines without allocating one object per attacker-supplied line. The
+  shell verifier binds every read to one Linux file descriptor, rejects
+  before/after metadata changes, streams its preimage, and creates fixed-name
+  intermediates only in a fresh private directory. Sparse/short-line memory
+  tests and a deterministic path-replacement regression enforce those
+  boundaries without retaining a second container.
+- **Config and state directory parents are private.** Direct CLI setup and the
+  installer both enforce mode `0700` on the config, identity, and audit-state
+  directories; secret files and the audit log remain mode `0600`.
+- **Audit writes refuse pathname redirection.** On Unix the log is opened with
+  no-follow semantics, must be a regular single-link file, and is tightened to
+  mode `0600` through the open handle. A symlinked private state directory is
+  refused, and audit refusal never changes the cryptographic operation result.
+- **Secret-looking identity arguments are redacted at every diagnostic edge.**
+  Recipient, signer, name, and parser mistakes cannot reflect an
+  `ANUBIS-SECRET-KEY-1...` capability into terminal output, JSON errors, or new
+  audit records. Public names and labels reject that marker anywhere rather
+  than only at the first byte, and legacy capability-bearing filenames are
+  ignored. Signer pins are validated and canonicalized before reuse.
+- **Human-mode paths are terminal-safe.** Control-bearing pathnames remain
+  unchanged for filesystem operations; structured output redacts any embedded
+  secret-identity capability, and human result/error rendering escapes controls
+  rather than executing them in a terminal. Parser errors suppress
+  control-bearing command-line values entirely.
+- **Unsized verification is linear under tiny reads.** The delayed-trailer
+  reader reuses its refill allocation, so a one-byte producer no longer causes
+  a large zero-filled extension on every read; the adversarial multi-chunk
+  matrix includes that producer.
+- **Desktop decrypts are content-bound.** The desktop requires a current full
+  inspection and always passes its content ID back to decrypt. File replacement
+  invalidates inspection and signature attestations; signer and signature
+  policy are snapshotted across overwrite confirmation. Structured paths remain
+  exact across QML and local IPC, while authorship wording requires a successful
+  content-and-signer-bound verification.
+- **Desktop local IPC uses a private runtime boundary.** Single-instance
+  requests use a mode/owner-checked runtime directory, bounded JSON frames, a
+  matching request acknowledgement, and a launch lock that serializes stale
+  socket removal with listen. If that boundary is unavailable, forwarding is
+  disabled rather than falling back to a public predictable socket.
 
 **Status of the primitive crates.** Several of the pure-Rust post-quantum
 implementations ANUBIS depends on carry pre-1.0 version numbers and their own
@@ -569,6 +616,13 @@ won or lost.
   are separate namespaces over different keys. One identity has both and they
   differ. `status --json` reports them as `fingerprint` and
   `signing_fingerprint`; `--signer` takes the latter.
+- **The short fingerprint is a human handle, not a Category-5 identifier.**
+  `ANUBIS-FP` is deliberately an 80-bit, transcribable prefix. The v3
+  `--signer` policy inherits that reduced binding strength even though the
+  embedded ML-DSA key and signature are much stronger. Do not describe a
+  fingerprint match itself as post-quantum Category 5. A future format/profile
+  must add domain-separated full-length recipient and signer identifiers while
+  retaining the short form only for display and error detection.
 - **Rotate identities if retrospective compromise matters.** There is no
   forward secrecy against identity compromise. Rotating and re-encrypting
   archives bounds the damage of a future key theft.

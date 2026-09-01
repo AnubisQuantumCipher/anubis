@@ -31,6 +31,26 @@ fn json_line(output: &Output) -> serde_json::Value {
     serde_json::from_str(line).expect("valid JSON output")
 }
 
+fn generated_identity(home: &std::path::Path) -> (String, String) {
+    let keygen = run(home, &["--json", "keygen"]);
+    assert!(
+        keygen.status.success(),
+        "keygen failed: {}",
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+    let recipient = json_line(&keygen)["recipient"]
+        .as_str()
+        .expect("recipient")
+        .to_owned();
+    let identity = std::fs::read_to_string(home.join(".config/anubis/identities/default.key"))
+        .expect("read disposable identity")
+        .lines()
+        .find(|line| line.starts_with("ANUBIS-SECRET-KEY-1"))
+        .expect("identity line")
+        .to_owned();
+    (recipient, identity)
+}
+
 fn assert_no_sidecar(directory: &std::path::Path, destination: &std::path::Path) {
     let prefix = format!(
         ".{}.",
@@ -46,6 +66,431 @@ fn assert_no_sidecar(directory: &std::path::Path, destination: &std::path::Path)
             .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix)),
         "failed operation must remove its temporary sidecar"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_cli_setup_keeps_config_and_state_parents_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = private_home("private-layout");
+    let keygen = run(&home, &["--json", "keygen"]);
+    assert!(
+        keygen.status.success(),
+        "keygen failed: {}",
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+
+    for directory in [
+        home.join(".config/anubis"),
+        home.join(".config/anubis/identities"),
+        home.join(".local/state/anubis"),
+    ] {
+        let mode = std::fs::metadata(&directory)
+            .expect("directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{} must be private", directory.display());
+    }
+
+    let audit = home.join(".local/state/anubis/audit.jsonl");
+    let audit_mode = std::fs::metadata(&audit)
+        .expect("audit metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(audit_mode, 0o600, "audit log must be private");
+
+    std::fs::remove_dir_all(home).expect("remove private home");
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_encryption_keeps_a_fresh_audit_directory_private_and_refuses_a_symlinked_log() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let donor_home = private_home("audit-donor");
+    let (recipient, _) = generated_identity(&donor_home);
+    let home = private_home("audit-direct-encrypt");
+    let state = home.join(".local/state/anubis");
+    std::fs::create_dir_all(&state).expect("create state path");
+    let sentinel = home.join("audit-sentinel");
+    std::fs::write(&sentinel, b"must remain unchanged").expect("write sentinel");
+    symlink(&sentinel, state.join("audit.jsonl")).expect("plant audit symlink");
+
+    let input = home.join("plain.txt");
+    let output = home.join("sealed.anubis");
+    std::fs::write(&input, b"audit hardening canary").expect("write plaintext");
+    let encryption = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-o",
+            output.to_str().expect("output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        encryption.status.success(),
+        "encryption failed: {}",
+        String::from_utf8_lossy(&encryption.stderr)
+    );
+    let mode = std::fs::metadata(&state)
+        .expect("state metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "audit state directory must be private");
+    assert_eq!(
+        std::fs::read(&sentinel).expect("read sentinel"),
+        b"must remain unchanged",
+        "audit append followed a planted symlink"
+    );
+
+    std::fs::remove_file(state.join("audit.jsonl")).expect("remove audit symlink");
+    std::fs::hard_link(&sentinel, state.join("audit.jsonl")).expect("plant audit hard link");
+    let second_output = home.join("sealed-again.anubis");
+    let second = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-o",
+            second_output.to_str().expect("second output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "encryption with a planted audit hard link failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).expect("read sentinel after hard link"),
+        b"must remain unchanged",
+        "audit append followed a planted hard link"
+    );
+
+    let symlink_home = private_home("audit-state-symlink");
+    let external_state = symlink_home.join("external-state");
+    std::fs::create_dir_all(&external_state).expect("create external state");
+    std::fs::create_dir_all(symlink_home.join(".local/state")).expect("create state parent");
+    symlink(&external_state, symlink_home.join(".local/state/anubis"))
+        .expect("plant state symlink");
+    let symlink_input = symlink_home.join("plain.txt");
+    let symlink_output = symlink_home.join("sealed.anubis");
+    std::fs::write(&symlink_input, b"state symlink canary").expect("write symlink plaintext");
+    let through_symlink = run(
+        &symlink_home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-o",
+            symlink_output.to_str().expect("symlink output path"),
+            symlink_input.to_str().expect("symlink input path"),
+        ],
+    );
+    assert!(
+        through_symlink.status.success(),
+        "audit refusal must not fail encryption: {}",
+        String::from_utf8_lossy(&through_symlink.stderr)
+    );
+    assert!(
+        !external_state.join("audit.jsonl").exists(),
+        "audit append followed a symlinked state directory"
+    );
+
+    std::fs::remove_dir_all(home).expect("remove test home");
+    std::fs::remove_dir_all(symlink_home).expect("remove symlink test home");
+    std::fs::remove_dir_all(donor_home).expect("remove donor home");
+}
+
+#[test]
+fn secret_identity_arguments_are_redacted_from_output_and_audit() {
+    let home = private_home("secret-redaction");
+    let (recipient, identity) = generated_identity(&home);
+    let input = home.join("plain.txt");
+    let output = home.join("sealed.anubis");
+    std::fs::write(&input, b"redaction canary").expect("write plaintext");
+
+    // A capability marker embedded after an otherwise-valid prefix must not
+    // bypass the public-name gate. This used to create a key file whose name,
+    // JSON result, and audit summary all reflected the complete secret.
+    let prefixed_secret_name = format!("x{identity}");
+    let keygen = run(
+        &home,
+        &["--json", "keygen", "--name", &prefixed_secret_name],
+    );
+    assert!(
+        !keygen.status.success(),
+        "prefixed secret identity was accepted as a public name"
+    );
+    let keygen_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&keygen.stdout),
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+    assert!(
+        !keygen_text.contains(&identity),
+        "prefixed secret identity reached keygen diagnostics"
+    );
+
+    let recipient_add = run(
+        &home,
+        &[
+            "--json",
+            "recipient",
+            "add",
+            "--label",
+            &prefixed_secret_name,
+            &recipient,
+        ],
+    );
+    assert!(
+        !recipient_add.status.success(),
+        "prefixed secret identity was accepted as a recipient label"
+    );
+    let recipient_add_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&recipient_add.stdout),
+        String::from_utf8_lossy(&recipient_add.stderr)
+    );
+    assert!(
+        !recipient_add_text.contains(&identity),
+        "prefixed secret identity reached recipient-add diagnostics"
+    );
+
+    // Status must also defend against a capability-bearing filename already
+    // present in an older or externally modified identity directory.
+    let identities = home.join(".config/anubis/identities");
+    std::fs::copy(
+        identities.join("default.key"),
+        identities.join(format!("{prefixed_secret_name}.key")),
+    )
+    .expect("create legacy secret-named identity fixture");
+    let status = run(&home, &["--json", "status"]);
+    assert!(status.status.success(), "status failed on legacy fixture");
+    let status_text = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !status_text.contains(&identity),
+        "secret identity from an existing filename reached status output"
+    );
+
+    let encryption = run(
+        &home,
+        &[
+            "--json",
+            "encrypt",
+            "-r",
+            &identity,
+            "-o",
+            output.to_str().expect("output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        !encryption.status.success(),
+        "secret recipient was accepted"
+    );
+    let encryption_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&encryption.stdout),
+        String::from_utf8_lossy(&encryption.stderr)
+    );
+    assert!(
+        !encryption_text.contains(&identity),
+        "secret identity reached encrypt diagnostics"
+    );
+
+    let verification = run(
+        &home,
+        &[
+            "--json",
+            "verify",
+            "--signer",
+            &identity,
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        !verification.status.success(),
+        "secret signer pin was accepted"
+    );
+    let verification_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verification.stdout),
+        String::from_utf8_lossy(&verification.stderr)
+    );
+    assert!(
+        !verification_text.contains(&identity),
+        "secret identity reached verify diagnostics"
+    );
+
+    let decryption = run(
+        &home,
+        &[
+            "--json",
+            "decrypt",
+            "--signer",
+            &identity,
+            "-o",
+            output.to_str().expect("output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        !decryption.status.success(),
+        "secret signer pin was accepted"
+    );
+    let decryption_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&decryption.stdout),
+        String::from_utf8_lossy(&decryption.stderr)
+    );
+    assert!(
+        !decryption_text.contains(&identity),
+        "secret identity reached decrypt diagnostics"
+    );
+
+    let typed_parser_failure = run(
+        &home,
+        &[
+            "decrypt",
+            "--expect-content-id",
+            &identity,
+            "-o",
+            output.to_str().expect("output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        !typed_parser_failure.status.success(),
+        "secret content-ID value was accepted"
+    );
+    let parser_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&typed_parser_failure.stdout),
+        String::from_utf8_lossy(&typed_parser_failure.stderr)
+    );
+    assert!(
+        !parser_text.contains(&identity),
+        "secret identity reached clap diagnostics"
+    );
+
+    let control_parser_failure = run(
+        &home,
+        &[
+            "decrypt",
+            "--expect-content-id",
+            "not-a-content-id\nFORGED-SUCCESS",
+            "-o",
+            output.to_str().expect("output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(!control_parser_failure.status.success());
+    let control_parser_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&control_parser_failure.stdout),
+        String::from_utf8_lossy(&control_parser_failure.stderr)
+    );
+    assert!(
+        !control_parser_text.contains("FORGED-SUCCESS"),
+        "control-bearing argument injected a diagnostic line"
+    );
+
+    // A capability-looking string in a structured result path is still a
+    // capability leak. The operation succeeds, but JSON and audit output must
+    // carry only the redaction marker.
+    let secret_named_input = home.join(format!("{identity}.txt"));
+    let safe_output = home.join("safe-output.anubis");
+    std::fs::write(&secret_named_input, b"structured path redaction canary")
+        .expect("write secret-named input");
+    let successful = run(
+        &home,
+        &[
+            "--json",
+            "encrypt",
+            "-r",
+            &recipient,
+            "-o",
+            safe_output.to_str().expect("safe output path"),
+            secret_named_input
+                .to_str()
+                .expect("secret-named input path"),
+        ],
+    );
+    assert!(
+        successful.status.success(),
+        "secret-named path encryption failed: {}",
+        String::from_utf8_lossy(&successful.stderr)
+    );
+    let successful_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&successful.stdout),
+        String::from_utf8_lossy(&successful.stderr)
+    );
+    assert!(
+        !successful_text.contains(&identity),
+        "secret identity reached successful structured output"
+    );
+    assert!(
+        successful_text.contains("<redacted-anubis-identity>"),
+        "successful structured output did not mark the redaction"
+    );
+
+    let audit = std::fs::read_to_string(home.join(".local/state/anubis/audit.jsonl"))
+        .expect("read audit log");
+    assert!(
+        !audit.contains(&identity),
+        "secret identity reached persistent audit data"
+    );
+    std::fs::remove_dir_all(home).expect("remove test home");
+}
+
+#[cfg(unix)]
+#[test]
+fn human_result_paths_escape_terminal_controls() {
+    let home = private_home("terminal-path");
+    let (recipient, _) = generated_identity(&home);
+    let input = home.join("plain\u{1b}[2J\ninjected.txt");
+    let output = home.join("sealed.anubis");
+    std::fs::write(&input, b"terminal path canary").expect("write plaintext");
+    let encryption = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-o",
+            output.to_str().expect("output path"),
+            input.to_str().expect("input path"),
+        ],
+    );
+    assert!(
+        encryption.status.success(),
+        "encryption failed: {}",
+        String::from_utf8_lossy(&encryption.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&encryption.stdout);
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw escape reached terminal output"
+    );
+    assert!(
+        !stdout.contains("\ninjected.txt"),
+        "pathname newline split terminal output"
+    );
+    assert!(
+        stdout.contains("\\n") && stdout.contains("\\u{1b}"),
+        "terminal controls were not rendered visibly: {stdout:?}"
+    );
+    std::fs::remove_dir_all(home).expect("remove test home");
 }
 
 #[cfg(unix)]
@@ -567,5 +1012,64 @@ fn inspect_verify_and_decrypt_report_the_same_content_id() {
         "malformed content ID must have a precise diagnostic"
     );
 
+    std::fs::remove_dir_all(home).expect("remove private home");
+}
+
+#[test]
+fn v4_refuses_before_v3_identity_access_or_plaintext_staging() {
+    let home = private_home("v4-dispatch-refusal");
+    let binary_path = home.join("future.anubis");
+    let armored_path = home.join("future.anubis.txt");
+    let future = format!(
+        "{}\nfuture v4 bytes must never reach v3\n",
+        anubis_crypto::container::V4_MAGIC
+    );
+    std::fs::write(&binary_path, future.as_bytes()).expect("write v4 binary fixture");
+    std::fs::write(
+        &armored_path,
+        anubis_crypto::armor::encode(future.as_bytes()),
+    )
+    .expect("write v4 armored fixture");
+
+    for source in [&binary_path, &armored_path] {
+        for command in ["inspect", "verify"] {
+            let output = run(&home, &[command, source.to_str().expect("fixture path")]);
+            assert!(!output.status.success(), "{command} accepted v4 input");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("refusing to reinterpret it as ANUBIS/v3"),
+                "{command} did not report the exact downgrade refusal: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let destination = home.join(format!(
+            "{}.plaintext",
+            source.file_name().expect("fixture name").to_string_lossy()
+        ));
+        let output = run(
+            &home,
+            &[
+                "decrypt",
+                "-o",
+                destination.to_str().expect("destination path"),
+                source.to_str().expect("fixture path"),
+            ],
+        );
+        assert!(!output.status.success(), "decrypt accepted v4 input");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("refusing to reinterpret it as ANUBIS/v3"),
+            "decrypt did not report the exact downgrade refusal: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!destination.exists(), "v4 refusal published plaintext");
+        assert_no_sidecar(&home, &destination);
+    }
+
+    assert!(
+        !home.join(".config/anubis/identities").exists(),
+        "v4 refusal touched the v3 identity store"
+    );
     std::fs::remove_dir_all(home).expect("remove private home");
 }

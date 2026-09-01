@@ -131,6 +131,16 @@ pub enum Source {
     Stdin,
 }
 
+/// One opened input and the length observed from that same handle.
+///
+/// Keeping these together prevents a pathname replacement between `open` and
+/// `metadata` from making format geometry describe different bytes than the
+/// reader actually supplies.
+pub struct OpenedSource {
+    pub reader: Box<dyn Read>,
+    pub len: Option<u64>,
+}
+
 /// Where bytes go.
 pub enum Sink {
     File(PathBuf),
@@ -154,22 +164,24 @@ impl Source {
         }
     }
 
-    /// Byte length when knowable. Pipes return `None`.
-    pub fn len(&self) -> Option<u64> {
-        match self {
-            Self::File(p) => std::fs::metadata(p).ok().map(|m| m.len()),
-            Self::Stdin => None,
-        }
-    }
-
-    pub fn open(&self) -> Result<Box<dyn Read>> {
-        let inner: Box<dyn Read> = match self {
-            Self::File(p) => Box::new(
-                std::fs::File::open(p).with_context(|| format!("reading {}", p.display()))?,
-            ),
-            Self::Stdin => Box::new(std::io::stdin().lock()),
+    /// Open the input once and bind any known length to that exact handle.
+    pub fn open(&self) -> Result<OpenedSource> {
+        let (inner, len): (Box<dyn Read>, Option<u64>) = match self {
+            Self::File(p) => {
+                let file =
+                    std::fs::File::open(p).with_context(|| format!("reading {}", p.display()))?;
+                let len = file
+                    .metadata()
+                    .with_context(|| format!("reading metadata for {}", p.display()))?
+                    .len();
+                (Box::new(file), Some(len))
+            }
+            Self::Stdin => (Box::new(std::io::stdin().lock()), None),
         };
-        Ok(Box::new(CancelReader { inner }))
+        Ok(OpenedSource {
+            reader: Box::new(CancelReader { inner }),
+            len,
+        })
     }
 }
 
@@ -647,5 +659,29 @@ mod tests {
 
         assert!(error.to_string().contains("limit"));
         assert_eq!(output.bytes, allowed);
+    }
+
+    #[test]
+    fn opened_file_length_stays_bound_to_the_open_handle() {
+        let _guard = TEST_LOCK.lock().expect("lock tests");
+        let dir = test_dir("opened-source-binding");
+        let input = dir.join("input.anubis");
+        let replacement = dir.join("replacement.anubis");
+        let original = b"original bytes";
+        std::fs::write(&input, original).expect("write original");
+
+        let mut opened = Source::File(input.clone()).open().expect("open source");
+        std::fs::write(&replacement, b"different replacement length").expect("write replacement");
+        std::fs::rename(&replacement, &input).expect("replace pathname");
+
+        assert_eq!(opened.len, Some(original.len() as u64));
+        let mut observed = Vec::new();
+        opened
+            .reader
+            .read_to_end(&mut observed)
+            .expect("read opened source");
+        assert_eq!(observed, original);
+
+        std::fs::remove_dir_all(dir).expect("remove test directory");
     }
 }

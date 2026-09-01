@@ -6,6 +6,7 @@ mod audit;
 mod io;
 mod paths;
 
+use anubis_crypto::container;
 use anubis_crypto::format::{self, EncryptOptions};
 use anubis_crypto::keys::{Identity, Recipient};
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,6 +20,7 @@ const SUITE_KEM: &str = "X25519+ML-KEM-1024";
 const SUITE_SIG: &str = "ML-DSA-87";
 const SUITE_AEAD: &str = "ChaCha20-Poly1305";
 const SUITE_KDF: &str = "HKDF-SHA512";
+const SECRET_IDENTITY_PREFIX: &str = "ANUBIS-SECRET-KEY-1";
 
 #[derive(Parser)]
 #[command(
@@ -143,6 +145,132 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// Remove capability-bearing identity strings before text reaches a terminal,
+/// JSON error, or persistent audit record.
+fn redact_sensitive(text: &str) -> String {
+    let uppercase = text.to_ascii_uppercase();
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(relative) = uppercase[cursor..].find(SECRET_IDENTITY_PREFIX) {
+        let start = cursor + relative;
+        output.push_str(&text[cursor..start]);
+        output.push_str("<redacted-anubis-identity>");
+        let mut end = start + SECRET_IDENTITY_PREFIX.len();
+        for (offset, character) in text[end..].char_indices() {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                end = start + SECRET_IDENTITY_PREFIX.len() + offset + character.len_utf8();
+            } else {
+                break;
+            }
+        }
+        cursor = end;
+    }
+    output.push_str(&text[cursor..]);
+    output
+}
+
+/// Escape control-bearing human output without changing JSON path values.
+fn is_terminal_control(character: char) -> bool {
+    character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
+}
+
+fn terminal_safe(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        if is_terminal_control(character) {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn terminal_safe_multiline(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character == '\n' {
+            output.push(character);
+        } else if is_terminal_control(character) {
+            output.extend(character.escape_default());
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn command_line_contains_terminal_controls() -> bool {
+    std::env::args_os()
+        .skip(1)
+        .any(|argument| argument.to_string_lossy().chars().any(is_terminal_control))
+}
+
+#[derive(Clone)]
+struct SignerFingerprint {
+    bytes: [u8; 10],
+    canonical: String,
+}
+
+impl SignerFingerprint {
+    fn parse(value: &str) -> Result<Self> {
+        if value
+            .trim_start()
+            .get(..SECRET_IDENTITY_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SECRET_IDENTITY_PREFIX))
+        {
+            bail!("a secret identity was supplied where a public signer fingerprint was required");
+        }
+
+        let mut hexadecimal = Vec::with_capacity(20);
+        for byte in value.trim().bytes() {
+            if byte.is_ascii_hexdigit() {
+                hexadecimal.push(byte);
+            } else if byte == b'-' || byte == b':' || byte.is_ascii_whitespace() {
+                continue;
+            } else {
+                bail!("signer fingerprint must contain exactly 20 hexadecimal characters");
+            }
+        }
+        if hexadecimal.len() != 20 {
+            bail!("signer fingerprint must contain exactly 20 hexadecimal characters");
+        }
+
+        let mut bytes = [0u8; 10];
+        for (slot, pair) in bytes.iter_mut().zip(hexadecimal.chunks_exact(2)) {
+            let high = hex_nibble(pair[0])
+                .ok_or_else(|| anyhow!("signer fingerprint contains a non-hex character"))?;
+            let low = hex_nibble(pair[1])
+                .ok_or_else(|| anyhow!("signer fingerprint contains a non-hex character"))?;
+            *slot = (high << 4) | low;
+        }
+
+        let mut canonical = String::with_capacity(24);
+        for (index, byte) in bytes.iter().enumerate() {
+            if index != 0 && index % 2 == 0 {
+                canonical.push('-');
+            }
+            std::fmt::Write::write_fmt(&mut canonical, format_args!("{byte:02X}"))
+                .expect("writing to a String cannot fail");
+        }
+        Ok(Self { bytes, canonical })
+    }
+
+    fn matches_rendered(&self, rendered: &str) -> bool {
+        let Ok(other) = Self::parse(rendered) else {
+            return false;
+        };
+        bool::from(<[u8] as subtle::ConstantTimeEq>::ct_eq(
+            self.bytes.as_slice(),
+            other.bytes.as_slice(),
+        ))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.canonical
+    }
+}
+
 #[derive(Subcommand)]
 enum RecipientAction {
     List,
@@ -179,7 +307,23 @@ fn main() {
         eprintln!("anubis: {error:#}");
         std::process::exit(1);
     }
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = error.exit_code();
+            let message = if error.use_stderr() && command_line_contains_terminal_controls() {
+                "error: command-line parsing failed; details were suppressed because an argument contains terminal control characters\n".to_string()
+            } else {
+                terminal_safe_multiline(&redact_sensitive(&error.to_string()))
+            };
+            if error.use_stderr() {
+                eprint!("{message}");
+            } else {
+                print!("{message}");
+            }
+            std::process::exit(exit_code);
+        }
+    };
     if let Err(e) = validate_stream_contract(&cli) {
         // Payload stdout must stay a byte stream. In particular, do not emit
         // the usual JSON error object here: that would turn a safely rejected
@@ -192,13 +336,14 @@ fn main() {
         Ok(()) => {}
         Err(e) => {
             let reported = e.downcast_ref::<VerifyFailed>().is_some();
+            let message = redact_sensitive(&format!("{e:#}"));
             if json {
                 if !reported {
-                    let obj = json!({"kind": "result", "ok": false, "error": e.to_string()});
+                    let obj = json!({"kind": "result", "ok": false, "error": message});
                     println!("{obj}");
                 }
             } else {
-                eprintln!("anubis: {e:#}");
+                eprintln!("anubis: {}", terminal_safe(&message));
             }
             std::process::exit(1);
         }
@@ -286,6 +431,10 @@ fn run(cli: &Cli) -> Result<()> {
 fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
     paths::ensure_dirs()?;
     let path = paths::identity_path(name)?;
+    // `check_name` rejects this marker anywhere, and this extra rendering
+    // boundary protects output and audit data if an older store already
+    // contains a capability-bearing filename.
+    let reported_name = redact_sensitive(name);
     if path.exists() && !force {
         bail!(
             "identity '{name}' already exists at {}; pass --force to replace it",
@@ -307,7 +456,7 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
     audit::append(&audit::Record {
         ts: created.clone(),
         op: "keygen".into(),
-        path: path.display().to_string(),
+        path: redact_sensitive(&path.display().to_string()),
         out: None,
         bytes: 0,
         ms: 0,
@@ -315,7 +464,10 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
         signed: true,
         recipients: 0,
         error: None,
-        summary: format!("generated identity '{name}' ({})", recipient.fingerprint()),
+        summary: format!(
+            "generated identity '{reported_name}' ({})",
+            recipient.fingerprint()
+        ),
     });
 
     if json {
@@ -323,8 +475,8 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
             "{}",
             json!({
                 "kind": "keygen",
-                "name": name,
-                "path": path.display().to_string(),
+                "name": reported_name,
+                "path": redact_sensitive(&path.display().to_string()),
                 "recipient": rec_str,
                 "fingerprint": recipient.fingerprint(),
                 "created": created,
@@ -332,7 +484,11 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
             })
         );
     } else {
-        println!("Identity '{name}' written to {}", path.display());
+        println!(
+            "Identity '{}' written to {}",
+            terminal_safe(&reported_name),
+            terminal_safe(&redact_sensitive(&path.display().to_string()))
+        );
         println!("Fingerprint: {}", recipient.fingerprint());
         println!("Recipient:   {rec_str}");
     }
@@ -391,6 +547,11 @@ fn all_identities() -> Result<Vec<(String, Identity)>> {
         let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
+        // Do not let a capability-bearing or otherwise non-canonical legacy
+        // filename become a public identity label or a decryption selector.
+        if paths::check_name(stem).is_err() {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&p) else {
             continue;
         };
@@ -403,6 +564,13 @@ fn all_identities() -> Result<Vec<(String, Identity)>> {
 
 /// Resolve a recipient given either a literal key or an address-book label.
 fn resolve_recipient(spec: &str) -> Result<Recipient> {
+    if spec
+        .trim_start()
+        .get(..SECRET_IDENTITY_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(SECRET_IDENTITY_PREFIX))
+    {
+        bail!("a secret identity was supplied where a public recipient was required");
+    }
     if spec.starts_with("anubis1") {
         return Recipient::decode(spec).map_err(|e| anyhow!("{e}"));
     }
@@ -526,14 +694,17 @@ fn cmd_encrypt(
             signer: signer.as_ref(),
         };
 
-        let total = src.len().unwrap_or(0);
+        let io::OpenedSource {
+            mut reader,
+            len: input_len,
+        } = src.open()?;
+        let total = input_len.unwrap_or(0);
         let mut prog = Progress {
             json,
             op: "encrypt",
             total,
             last: 0,
         };
-        let mut reader = src.open()?;
 
         if armor {
             const CAP: usize = anubis_crypto::armor::MAX_ARMOR_BYTES;
@@ -541,7 +712,7 @@ fn cmd_encrypt(
             // encrypted into memory. Armoring never shrinks and base64 costs
             // at least 4/3, so plaintext alone already exceeding 3/4 of the
             // cap cannot possibly fit.
-            if let Some(n) = src.len()
+            if let Some(n) = input_len
                 && (n as usize).saturating_mul(4) / 3 > CAP
             {
                 bail!(
@@ -733,6 +904,40 @@ mod staged_output {
 
 use staged_output::StagedOutput;
 
+struct V3Input {
+    reader: Box<dyn Read>,
+    total_len: Option<u64>,
+}
+
+/// Decode armor when present, make one bounded outer-version decision, and
+/// return only an exact v3 reader. A recognized v4 token is refused here,
+/// before callers load v3 identities or create plaintext staging.
+fn open_v3_input(src: &io::Source) -> Result<V3Input> {
+    let mut probe = [0u8; 512];
+    let io::OpenedSource {
+        mut reader,
+        len: input_len,
+    } = src.open()?;
+    let n = fill(&mut reader, &mut probe)?;
+    let head = &probe[..n];
+
+    let (decoded, total_len): (Box<dyn Read>, Option<u64>) =
+        if anubis_crypto::armor::looks_armored(head) {
+            let raw = read_armored(head, &mut reader)?;
+            let len = raw.len() as u64;
+            (Box::new(std::io::Cursor::new(raw)), Some(len))
+        } else {
+            let replay = std::io::Cursor::new(head.to_vec()).chain(reader);
+            (Box::new(replay), input_len)
+        };
+
+    let v3 = container::dispatch(decoded)?.require_v3()?;
+    Ok(V3Input {
+        reader: Box::new(v3.into_reader()),
+        total_len,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_decrypt(
     json: bool,
@@ -744,6 +949,7 @@ fn cmd_decrypt(
     expected_content_id: Option<&ExpectedContentId>,
     input: &Path,
 ) -> Result<()> {
+    let signer_pin = signer_pin.map(SignerFingerprint::parse).transpose()?;
     let started = Instant::now();
     let src = io::Source::parse(input);
 
@@ -768,6 +974,11 @@ fn cmd_decrypt(
     let result = (|| -> Result<u64> {
         sink.guard(force)?;
 
+        // Version dispatch deliberately precedes identity access and staging.
+        // Future-format bytes cannot make the v3 key path or plaintext sink do
+        // work before the exact downgrade refusal is returned.
+        let mut input = open_v3_input(&src)?;
+
         let ids: Vec<Identity> = match identity {
             Some(name) => vec![load_identity(name)?],
             None => {
@@ -779,19 +990,13 @@ fn cmd_decrypt(
             }
         };
 
-        let total = src.len().unwrap_or(0);
+        let total = input.total_len.unwrap_or(0);
         let mut prog = Progress {
             json,
             op: "decrypt",
             total,
             last: 0,
         };
-
-        let mut probe = [0u8; 512];
-        let mut reader = src.open()?;
-        let n = fill(&mut reader, &mut probe)?;
-        let head = &probe[..n];
-        let armored = anubis_crypto::armor::looks_armored(head);
 
         // Stream into private staging and obtain the publication capability
         // only after cryptography and caller policy both succeed. Buffering in
@@ -801,20 +1006,15 @@ fn cmd_decrypt(
 
         let dec = {
             let mut w = out.writer();
-            let r = if armored {
-                let raw = read_armored(head, &mut reader)?;
-                let len = raw.len() as u64;
-                format::decrypt_provisional(&ids, &raw[..], len, &mut w, |d| prog.tick(d))
-            } else {
-                let joined = head.chain(reader);
-                match src.len() {
-                    Some(len) => {
-                        format::decrypt_provisional(&ids, joined, len, &mut w, |d| prog.tick(d))
-                    }
-                    None => format::decrypt_unsized_provisional(&ids, joined, &mut w, |d| {
-                        prog.tick(d);
-                    }),
+            let r = match input.total_len {
+                Some(len) => {
+                    format::decrypt_provisional(&ids, &mut input.reader, len, &mut w, |d| {
+                        prog.tick(d)
+                    })
                 }
+                None => format::decrypt_unsized_provisional(&ids, &mut input.reader, &mut w, |d| {
+                    prog.tick(d)
+                }),
             };
             r.map_err(|e| anyhow!("{e}"))?
         };
@@ -852,20 +1052,13 @@ fn cmd_decrypt(
                      (--require-signature / --signer)"
                 );
             }
-            if let Some(want) = signer_pin {
+            if let Some(want) = signer_pin.as_ref() {
                 let got = signer_fp.as_deref().unwrap_or("");
-                let want_n = want.trim().to_ascii_uppercase().replace('-', "");
-                let got_n = got.replace('-', "");
                 // Constant time is not strictly required -- a fingerprint is a
                 // hash of a public key -- but a variable-time compare on a
                 // security decision is a thing reviewers rightly stop on.
-                let eq = want_n.len() == got_n.len()
-                    && bool::from(<[u8] as subtle::ConstantTimeEq>::ct_eq(
-                        want_n.as_bytes(),
-                        got_n.as_bytes(),
-                    ));
-                if !eq {
-                    bail!("signed by {got}, not the pinned signer {want}");
+                if !want.matches_rendered(got) {
+                    bail!("signed by {got}, not the pinned signer {}", want.as_str());
                 }
             }
             Ok(())
@@ -963,8 +1156,10 @@ fn emit_result_signed(
     let ts = audit::now_iso();
     match result {
         Ok(bytes) => {
+            let reported_input = redact_sensitive(input);
+            let reported_out = out.map(|value| redact_sensitive(value));
             let summary = format!(
-                "{op} {input} ({bytes} bytes{})",
+                "{op} {reported_input} ({bytes} bytes{})",
                 match (signed, signer) {
                     (true, Some(fp)) => format!(", signed by {fp}"),
                     (true, None) => ", signed".into(),
@@ -974,8 +1169,8 @@ fn emit_result_signed(
             audit::append(&audit::Record {
                 ts,
                 op: op.into(),
-                path: input.to_string(),
-                out: out.cloned(),
+                path: reported_input.clone(),
+                out: reported_out.clone(),
                 bytes,
                 ms,
                 ok: true,
@@ -988,8 +1183,8 @@ fn emit_result_signed(
                 println!(
                     "{}",
                     json!({"kind":"result","op":op,"ok":true,
-                    "path":input,
-                    "out":out,
+                    "path":reported_input,
+                    "out":reported_out,
                     "bytes":bytes,"ms":ms,"signed":signed,
                     "signer_fingerprint":signer,
                     "content_id":content_id.map(content_id_hex),
@@ -1021,8 +1216,9 @@ fn emit_result_signed(
                     (false, _) => String::new(),
                 };
                 let line = format!(
-                    "{op}: {input} -> {} ({bytes} bytes, {ms} ms{note})",
-                    out.map_or("", |s| s.as_str()),
+                    "{op}: {} -> {} ({bytes} bytes, {ms} ms{note})",
+                    terminal_safe(&reported_input),
+                    terminal_safe(reported_out.as_deref().unwrap_or("")),
                 );
                 // Human output moves to stderr when the payload owns stdout.
                 if out.is_some_and(|s| s == "-") {
@@ -1034,11 +1230,12 @@ fn emit_result_signed(
             Ok(())
         }
         Err(e) => {
-            let msg = format!("{e:#}");
+            let msg = redact_sensitive(&format!("{e:#}"));
+            let audit_input = redact_sensitive(input);
             audit::append(&audit::Record {
                 ts,
                 op: op.into(),
-                path: input.to_string(),
+                path: audit_input.clone(),
                 out: None,
                 bytes: 0,
                 ms,
@@ -1046,7 +1243,7 @@ fn emit_result_signed(
                 signed,
                 recipients,
                 error: Some(msg.clone()),
-                summary: format!("{op} FAILED on {input}: {msg}"),
+                summary: format!("{op} FAILED on {audit_input}: {msg}"),
             });
             Err(e)
         }
@@ -1057,33 +1254,20 @@ fn emit_result_signed(
 
 fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
     let src = io::Source::parse(input);
-
-    // Inspect must understand everything decrypt accepts, or a user who can
-    // decrypt an armored container cannot inspect it.
-    let mut probe = [0u8; 512];
-    let mut reader = src.open()?;
-    let n = fill(&mut reader, &mut probe)?;
-    let head = &probe[..n];
+    let mut input = open_v3_input(&src)?;
 
     if json {
-        let info = if anubis_crypto::armor::looks_armored(head) {
-            let raw = read_armored(head, &mut reader)?;
-            let len = raw.len() as u64;
-            format::inspect_with_content_id(&raw[..], len).map_err(|e| anyhow!("{e}"))?
-        } else {
-            let joined = head.chain(reader);
-            match src.len() {
-                Some(len) => {
-                    format::inspect_with_content_id(joined, len).map_err(|e| anyhow!("{e}"))?
-                }
-                None => format::inspect_unsized(joined).map_err(|e| anyhow!("{e}"))?,
-            }
+        let reported_path = redact_sensitive(&src.label());
+        let info = match input.total_len {
+            Some(len) => format::inspect_with_content_id(&mut input.reader, len)
+                .map_err(|e| anyhow!("{e}"))?,
+            None => format::inspect_unsized(&mut input.reader).map_err(|e| anyhow!("{e}"))?,
         };
         println!(
             "{}",
             json!({
                 "kind": "inspect",
-                "path": src.label(),
+                "path": reported_path,
                 "format": info.format,
                 "stanzas": [{"type": format::STANZA_HYBRID, "recipients": info.recipients}],
                 "recipients": info.recipients,
@@ -1105,18 +1289,11 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let info = if anubis_crypto::armor::looks_armored(head) {
-        let raw = read_armored(head, &mut reader)?;
-        let len = raw.len() as u64;
-        format::inspect(&raw[..], len).map_err(|e| anyhow!("{e}"))?
-    } else {
-        let joined = head.chain(reader);
-        match src.len() {
-            Some(len) => format::inspect(joined, len).map_err(|e| anyhow!("{e}"))?,
-            None => format::inspect_unsized(joined)
-                .map(Into::into)
-                .map_err(|e| anyhow!("{e}"))?,
-        }
+    let info = match input.total_len {
+        Some(len) => format::inspect(&mut input.reader, len).map_err(|e| anyhow!("{e}"))?,
+        None => format::inspect_unsized(&mut input.reader)
+            .map(Into::into)
+            .map_err(|e| anyhow!("{e}"))?,
     };
     println!("format:      {}", info.format);
     println!("recipients:  {}", info.recipients);
@@ -1143,14 +1320,8 @@ fn cmd_inspect(json: bool, input: &Path) -> Result<()> {
 /// public key and leaks nothing, but a variable-time compare on a security
 /// decision is a thing reviewers rightly stop on, and `decrypt` has always
 /// done it this way. Both commands now call this, so they cannot drift.
-fn fp_matches(want: &str, got: &str) -> bool {
-    let want_n = want.trim().to_ascii_uppercase().replace('-', "");
-    let got_n = got.trim().to_ascii_uppercase().replace('-', "");
-    want_n.len() == got_n.len()
-        && bool::from(<[u8] as subtle::ConstantTimeEq>::ct_eq(
-            want_n.as_bytes(),
-            got_n.as_bytes(),
-        ))
+fn fp_matches(want: &SignerFingerprint, got: &str) -> bool {
+    want.matches_rendered(got)
 }
 
 // ------------------------------------------------------------------ verify
@@ -1169,30 +1340,77 @@ fn fp_matches(want: &str, got: &str) -> bool {
 /// about whether the sender signed.
 fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()> {
     let src = io::Source::parse(input);
-
-    let mut probe = [0u8; 512];
-    let mut reader = src.open()?;
-    let n = fill(&mut reader, &mut probe)?;
-    let head = &probe[..n];
+    let reported_path = redact_sensitive(&src.label());
+    let want_signer = match want_signer.map(SignerFingerprint::parse).transpose() {
+        Ok(pin) => pin,
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    json!({
+                        "kind": "verify",
+                        "path": reported_path,
+                        "ok": false,
+                        "format": null,
+                        "signed": null,
+                        "signature_ok": null,
+                        "signer_fingerprint": null,
+                        "content_id": null,
+                        "signer_pinned": null,
+                        "signer_matches": null,
+                        "recipients": null,
+                        "header_bytes": null,
+                        "payload_bytes": null,
+                        "chunks": null,
+                        "header_mac_ok": null,
+                        "error": error.to_string(),
+                    })
+                );
+            }
+            return Err(VerifyFailed(error).into());
+        }
+    };
+    let want_signer_ref = want_signer.as_ref();
+    let mut input = match open_v3_input(&src) {
+        Ok(input) => input,
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    json!({
+                        "kind": "verify",
+                        "path": reported_path,
+                        "ok": false,
+                        "format": null,
+                        "signed": null,
+                        "signature_ok": null,
+                        "signer_fingerprint": null,
+                        "content_id": null,
+                        "signer_pinned": want_signer_ref.map(SignerFingerprint::as_str),
+                        "signer_matches": null,
+                        "recipients": null,
+                        "header_bytes": null,
+                        "payload_bytes": null,
+                        "chunks": null,
+                        "header_mac_ok": null,
+                        "error": error.to_string(),
+                    })
+                );
+            }
+            return Err(VerifyFailed(error).into());
+        }
+    };
 
     // Armor and pipes both have to be resolved to a known length first: the
     // payload span is computed by subtracting the header and the fixed
     // trailer from the total.
-    let info = if anubis_crypto::armor::looks_armored(head) {
-        let raw = read_armored(head, &mut reader)?;
-        let len = raw.len() as u64;
-        format::verify_report(&raw[..], len)
-    } else {
-        let joined = head.chain(reader);
-        match src.len() {
-            Some(len) => format::verify_report(joined, len),
-            // A pipe has no length. Stream it through the delay buffer rather
-            // than reading it into memory: this command is pointed at
-            // containers from strangers, and "buffer whatever arrives" is an
-            // unauthenticated memory-exhaustion invitation on exactly the
-            // input that deserves it least.
-            None => format::verify_unsized_report(joined),
-        }
+    let info = match input.total_len {
+        Some(len) => format::verify_report(&mut input.reader, len),
+        // A pipe has no length. Stream it through the delay buffer rather
+        // than reading it into memory: this command is pointed at containers
+        // from strangers, and "buffer whatever arrives" is an unauthenticated
+        // memory-exhaustion invitation on the input that deserves it least.
+        None => format::verify_unsized_report(&mut input.reader),
     };
 
     let info = match info {
@@ -1211,14 +1429,14 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
                     "{}",
                     json!({
                         "kind": "verify",
-                        "path": src.label(),
+                        "path": reported_path,
                         "ok": false,
                         "format": null,
                         "signed": null,
                         "signature_ok": null,
                         "signer_fingerprint": null,
                         "content_id": null,
-                        "signer_pinned": want_signer,
+                        "signer_pinned": want_signer_ref.map(SignerFingerprint::as_str),
                         "signer_matches": null,
                         "recipients": null,
                         "header_bytes": null,
@@ -1241,7 +1459,7 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
     // Pinning is checked after the cryptography, and a mismatch is a failure
     // even though the signature itself is sound: the caller asked whether a
     // specific key signed this, and the answer is no.
-    let pin_ok = match (want_signer, fp.as_deref()) {
+    let pin_ok = match (want_signer_ref, fp.as_deref()) {
         (None, _) => true,
         (Some(want), Some(have)) => fp_matches(want, have),
         (Some(_), None) => false,
@@ -1263,15 +1481,15 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
             "{}",
             json!({
                 "kind": "verify",
-                "path": src.label(),
+                "path": reported_path,
                 "ok": ok,
                 "format": info.format,
                 "signed": info.signed,
                 "signature_ok": info.signature_ok,
                 "signer_fingerprint": fp,
                 "content_id": content_id_hex(&info.content_id),
-                "signer_pinned": want_signer,
-                "signer_matches": want_signer.map(|_| pin_ok),
+                "signer_pinned": want_signer_ref.map(SignerFingerprint::as_str),
+                "signer_matches": want_signer_ref.map(|_| pin_ok),
                 "recipients": info.recipients,
                 "header_bytes": info.header_bytes,
                 "payload_bytes": info.payload_bytes,
@@ -1303,12 +1521,11 @@ fn cmd_verify(json: bool, want_signer: Option<&str>, input: &Path) -> Result<()>
             "payload:     {} bytes in {} chunks",
             info.payload_bytes, info.chunks
         );
-        if let Some(want) = want_signer {
+        if want_signer_ref.is_some() {
             println!(
                 "pinned:      {}",
                 if pin_ok { "MATCHES" } else { "MISMATCH" }
             );
-            let _ = want;
         }
         println!("\nA valid signature proves the holder of that key produced these exact");
         println!("bytes. It does not say who that is: compare the fingerprint against a");
@@ -1353,8 +1570,8 @@ fn cmd_status(json: bool) -> Result<()> {
             })
             .unwrap_or_default();
         identities.push(json!({
-            "name": name,
-            "path": path.display().to_string(),
+            "name": redact_sensitive(&name),
+            "path": redact_sensitive(&path.display().to_string()),
             "recipient": rec.encode().map_err(|e| anyhow!("{e}"))?,
             "fingerprint": rec.fingerprint(),
             "signing_fingerprint": anubis_crypto::keys::fingerprint(
@@ -1370,15 +1587,22 @@ fn cmd_status(json: bool) -> Result<()> {
         let fp = Recipient::decode(&key)
             .map(|r| r.fingerprint())
             .unwrap_or_else(|_| "invalid".into());
-        recipients.push(json!({"label": label, "key": key, "fingerprint": fp}));
+        recipients.push(json!({
+            "label": redact_sensitive(&label),
+            "key": redact_sensitive(&key),
+            "fingerprint": fp,
+        }));
     }
 
     let recent: Vec<_> = audit::recent(25)?
         .into_iter()
         .map(|r| {
-            json!({"ts": r.ts, "op": r.op, "path": r.path, "out": r.out,
+            json!({"ts": r.ts, "op": r.op,
+                   "path": redact_sensitive(&r.path),
+                   "out": r.out.as_deref().map(redact_sensitive),
                    "bytes": r.bytes, "ms": r.ms, "ok": r.ok, "signed": r.signed,
-                   "recipients": r.recipients, "error": r.error})
+                   "recipients": r.recipients,
+                   "error": r.error.as_deref().map(redact_sensitive)})
         })
         .collect();
     let (enc, dec, failed) = audit::counts()?;
@@ -1445,7 +1669,11 @@ fn cmd_recipient(json: bool, action: &RecipientAction) -> Result<()> {
                         let fp = Recipient::decode(key)
                             .map(|r| r.fingerprint())
                             .unwrap_or_else(|_| "invalid".into());
-                        json!({"label": label, "key": key, "fingerprint": fp})
+                        json!({
+                            "label": redact_sensitive(label),
+                            "key": redact_sensitive(key),
+                            "fingerprint": fp,
+                        })
                     })
                     .collect();
                 println!("{}", json!({"kind": "recipients", "recipients": items}));
@@ -1454,8 +1682,8 @@ fn cmd_recipient(json: bool, action: &RecipientAction) -> Result<()> {
                     let fp = Recipient::decode(key)
                         .map(|r| r.fingerprint())
                         .unwrap_or_else(|_| "invalid".into());
-                    println!("{label:<16} {fp}");
-                    println!("{:<16} {key}", "");
+                    println!("{:<16} {fp}", terminal_safe(&redact_sensitive(label)));
+                    println!("{:<16} {}", "", terminal_safe(&redact_sensitive(key)));
                 }
             }
             Ok(())
@@ -1463,6 +1691,7 @@ fn cmd_recipient(json: bool, action: &RecipientAction) -> Result<()> {
         RecipientAction::Add { label, key } => {
             paths::check_name(label)?;
             let rec = Recipient::decode(key).map_err(|e| anyhow!("{e}"))?;
+            let reported_label = redact_sensitive(label);
             let mut book = paths::load_recipients()?;
             book.insert(label.clone(), key.clone());
             paths::save_recipients(&book)?;
@@ -1470,10 +1699,14 @@ fn cmd_recipient(json: bool, action: &RecipientAction) -> Result<()> {
                 println!(
                     "{}",
                     json!({"kind":"result","op":"recipient.add","ok":true,
-                           "label":label,"fingerprint":rec.fingerprint(),"error":null})
+                           "label":reported_label,"fingerprint":rec.fingerprint(),"error":null})
                 );
             } else {
-                println!("added '{label}' ({})", rec.fingerprint());
+                println!(
+                    "added '{}' ({})",
+                    terminal_safe(&reported_label),
+                    rec.fingerprint()
+                );
             }
             Ok(())
         }
@@ -1487,10 +1720,10 @@ fn cmd_recipient(json: bool, action: &RecipientAction) -> Result<()> {
                 println!(
                     "{}",
                     json!({"kind":"result","op":"recipient.remove","ok":true,
-                           "label":label,"error":null})
+                           "label":redact_sensitive(label),"error":null})
                 );
             } else {
-                println!("removed '{label}'");
+                println!("removed '{}'", terminal_safe(&redact_sensitive(label)));
             }
             Ok(())
         }

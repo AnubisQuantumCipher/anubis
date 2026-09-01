@@ -1,13 +1,109 @@
+#include <QFile>
+#include <QFileInfo>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QtTest>
 
 #include "datastream.hpp"
+#include "fileview.hpp"
+#include "openrequest.hpp"
 #include "process.hpp"
 
 class ProcessLifecycleTest final : public QObject {
   Q_OBJECT
 
 private slots:
+  void openRequestPreservesExactStructuredPath() {
+    const QString exact = QStringLiteral(" /tmp/\"quoted\"\ncontainer.anubis ");
+    const QString requestId = QStringLiteral("request-token");
+    const QByteArray message = AnubisOpenRequest::encode(exact, requestId);
+    QString decoded;
+    QString decodedId;
+
+    QVERIFY(AnubisOpenRequest::decode(message, &decoded, &decodedId));
+    QCOMPARE(decoded, exact);
+    QCOMPARE(decodedId, requestId);
+  }
+
+  void openRequestCarriesEmptyRaiseMessage() {
+    const QString requestId = QStringLiteral("request-token");
+    const QByteArray message =
+      AnubisOpenRequest::encode(QString(), requestId);
+    QString decoded = QStringLiteral("stale");
+    QString decodedId;
+
+    QVERIFY(AnubisOpenRequest::decode(message, &decoded, &decodedId));
+    QCOMPARE(decoded, QString());
+    QCOMPARE(decodedId, requestId);
+  }
+
+  void openRequestRejectsUnstructuredBytes() {
+    QString decoded = QStringLiteral("unchanged");
+    QString decodedId;
+
+    QVERIFY(!AnubisOpenRequest::decode(
+      QByteArrayLiteral(" /tmp/container.anubis\n"), &decoded, &decodedId));
+    QCOMPARE(decoded, QStringLiteral("unchanged"));
+  }
+
+  void openRequestRejectsOversizedFrames() {
+    QByteArray oversized(AnubisOpenRequest::MaxFrameBytes + 1, 'x');
+    oversized[oversized.size() - 1] = '\n';
+    QString decoded = QStringLiteral("unchanged");
+    QString decodedId = QStringLiteral("unchanged-id");
+
+    QVERIFY(!AnubisOpenRequest::decode(oversized, &decoded, &decodedId));
+    QCOMPARE(decoded, QStringLiteral("unchanged"));
+    QCOMPARE(decodedId, QStringLiteral("unchanged-id"));
+  }
+
+  void acknowledgementMustMatchRequest() {
+    const QString requestId = QStringLiteral("request-token");
+    const QByteArray response = AnubisOpenRequest::encodeAck(requestId);
+
+    QVERIFY(AnubisOpenRequest::decodeAck(response, requestId));
+    QVERIFY(!AnubisOpenRequest::decodeAck(
+      response, QStringLiteral("different-request")));
+    QVERIFY(!AnubisOpenRequest::decodeAck(
+      QByteArrayLiteral("{\"type\":\"accepted\"}\n"), requestId));
+  }
+
+  void runtimeDirectoryMustBeOwnedAndPrivate() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QFile::Permissions privatePermissions = QFile::ReadOwner
+      | QFile::WriteOwner | QFile::ExeOwner;
+    QVERIFY(QFile::setPermissions(directory.path(), privatePermissions));
+    const uint ownerId = QFileInfo(directory.path()).ownerId();
+    QVERIFY(AnubisOpenRequest::isPrivateRuntimeDirectory(
+      directory.path(), ownerId));
+
+    QVERIFY(QFile::setPermissions(
+      directory.path(), privatePermissions | QFile::ReadGroup));
+    QVERIFY(!AnubisOpenRequest::isPrivateRuntimeDirectory(
+      directory.path(), ownerId));
+  }
+
+  void fileViewCanWatchWithoutReadingContainerContents() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("sealed.anubis"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    const QByteArray payload = QByteArrayLiteral("container bytes");
+    QCOMPARE(file.write(payload), qint64(payload.size()));
+    file.close();
+
+    FileView view;
+    view.setReadContents(false);
+    view.setPath(path);
+    QVERIFY(view.exists());
+    QCOMPARE(view.text(), QString());
+
+    view.setReadContents(true);
+    QCOMPARE(view.text(), QStringLiteral("container bytes"));
+  }
+
   void collectorResetClearsPreviousRun() {
     StdioCollector collector;
     collector.feed(QStringLiteral("previous"));

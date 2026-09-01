@@ -49,6 +49,31 @@ and record the result in the implementation review. If drift changes the version
 dispatcher, publication gate, cryptographic suite, secret owner, or evidence
 schema, return to design review instead of adapting silently.
 
+## Implemented Foundation Checkpoint
+
+The repository now contains a deliberately non-operational foundation ahead of
+`WP-V4-SPEC`:
+
+- `anubis-crypto::container` makes one bounded exact v1/v2/v3/v4/unknown
+  decision, replays all consumed v3 bytes, and exposes no fallback state;
+- the CLI requires the v3 dispatch capability before loading identities or
+  creating plaintext staging, for binary and armored input;
+- recognized v4 input is refused explicitly, and an explicit v4 write request
+  cannot yield a v3 permit;
+- `anubis-v4-core` is a separate non-publishable crate with no production suite
+  value, parser, writer, crypto operation, v3 key dependency, backend, or
+  provider-supplied validation claim;
+- provider activation is tested only with a fake exact-suite/self-test boundary;
+- the version policy is Kani-covered, while reader replay, CLI ordering, and
+  binary/armored refusal remain ordinary tests with their stated limitations.
+
+This checkpoint does not complete `WP-V4-SPEC` or `WP-V4-CORE`. It emits no v4
+bytes and deliberately leaves the classical contribution, combiner, key wrap,
+KDF, IV/nonce ownership, transcript, chunk, and provider decisions unresolved.
+It also leaves full-length, domain-separated recipient and signer identifiers
+as a specification gate: v3's transcribable 80-bit fingerprints remain useful
+display handles but are not a Category-5 authorization identity.
+
 ## Affected Components
 
 | Component | Expected role |

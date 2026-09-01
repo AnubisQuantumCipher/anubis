@@ -55,16 +55,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export HOME="$(mktemp -d)"
+          ANUBIS_CI_ROOT=$(mktemp -d)
+          readonly ANUBIS_CI_ROOT
+          trap 'case "$ANUBIS_CI_ROOT" in /tmp/*) find "$ANUBIS_CI_ROOT" -xdev -depth -delete ;; *) exit 1 ;; esac' EXIT
           BIN=target/release/anubis
-          "$BIN" keygen --name ci --json > /dev/null
-          KEY=$("$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["identities"][0]["recipient"])')
+          env HOME="$ANUBIS_CI_ROOT" "$BIN" keygen --name ci --json > /dev/null
+          KEY=$(env HOME="$ANUBIS_CI_ROOT" "$BIN" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["identities"][0]["recipient"])')
           echo "ci canary" > plain.txt
-          "$BIN" encrypt --json -r "$KEY" --sign --identity ci -o sealed.anubis plain.txt > /dev/null
+          env HOME="$ANUBIS_CI_ROOT" "$BIN" encrypt --json -r "$KEY" --sign --identity ci -o sealed.anubis plain.txt > /dev/null
 
           # Destroy every private key. Decrypt must now fail and verify must not.
-          rm -rf "$HOME/.config/anubis/identities"
-          if "$BIN" decrypt -o /dev/null sealed.anubis 2>/dev/null; then
+          identity_dir="$ANUBIS_CI_ROOT/.config/anubis/identities"
+          case "$identity_dir" in "$ANUBIS_CI_ROOT"/.config/anubis/identities) ;; *) exit 1 ;; esac
+          find "$identity_dir" -xdev -depth -delete
+          if env HOME="$ANUBIS_CI_ROOT" "$BIN" decrypt -o /dev/null sealed.anubis 2>/dev/null; then
             echo "decrypt succeeded without any identity"; exit 1
           fi
           "$BIN" verify sealed.anubis
@@ -93,30 +97,62 @@ jobs:
           fi
           echo "keyless verification: ok"
 
-      # The independent verifier must agree with the reference implementation,
-      # or one of the two is wrong and the specification cannot be trusted.
-      #
-      # ML-DSA arrived in OpenSSL 3.5, and the GitHub runners currently ship
-      # 3.0.x. Where the capability is absent the check is SKIPPED with a
-      # notice rather than failed: a runner that cannot do post-quantum
-      # signatures says nothing about this repository. It is never silently
-      # passed, because a gate that quietly stops gating is worse than none.
-      - name: Independent OpenSSL verifier agrees
+  openssl-interop:
+    name: independent OpenSSL ML-DSA interoperability
+    runs-on: ubuntu-latest
+    # The Ubuntu host currently lacks ML-DSA. Arch is also the deployment
+    # target and supplies a stock OpenSSL provider with ML-DSA support. This
+    # dedicated gate refuses a missing capability instead of reporting a skip
+    # as success.
+    container: archlinux:latest
+    steps:
+      - name: Build and verification tools
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rustup python openssl
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Pinned Rust toolchain
+        run: |
+          rustup toolchain install "$ANUBIS_RUST_VERSION" --profile minimal
+          rustup default "$ANUBIS_RUST_VERSION"
+          test "$(rustc --version | awk '{ print $2 }')" = "$ANUBIS_RUST_VERSION"
+
+      - name: Generate an independent-verification fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p anubis-cli
+          ANUBIS_INTEROP_ROOT=$(mktemp -d)
+          readonly ANUBIS_INTEROP_ROOT
+          trap 'case "$ANUBIS_INTEROP_ROOT" in /tmp/*) find "$ANUBIS_INTEROP_ROOT" -xdev -depth -delete ;; *) exit 1 ;; esac' EXIT
+          BIN=target/release/anubis
+          env HOME="$ANUBIS_INTEROP_ROOT" "$BIN" keygen --name ci --json > /dev/null
+          KEY=$(env HOME="$ANUBIS_INTEROP_ROOT" "$BIN" status --json | python -c 'import json,sys; print(json.load(sys.stdin)["identities"][0]["recipient"])')
+          printf '%s\n' 'ci OpenSSL interoperability canary' > plain.txt
+          env HOME="$ANUBIS_INTEROP_ROOT" "$BIN" encrypt --json -r "$KEY" --sign --identity ci \
+            -o sealed.anubis plain.txt > /dev/null
+          python -c "b=bytearray(open('sealed.anubis','rb').read()); b[-100]^=1; open('tampered.anubis','wb').write(b)"
+
+      - name: Stock OpenSSL independently accepts valid and rejects tampered
         shell: bash
         run: |
           set -euo pipefail
           openssl version
-          ver=$(openssl version | awk '{print $2}')
-          maj=${ver%%.*}; rest=${ver#*.}; min=${rest%%.*}
-          if [ "$maj" -lt 3 ] || { [ "$maj" -eq 3 ] && [ "$min" -lt 5 ]; }; then
-            echo "::notice title=OpenSSL cross-check skipped::openssl $ver has no ML-DSA (needs >= 3.5); the independent verifier could not be exercised on this runner"
-            exit 0
-          fi
+          openssl list -signature-algorithms | grep 'ML-DSA-87' > /dev/null
           sh docs/verify/openssl-verify.sh sealed.anubis
+          python docs/verify/anubis-verify.py --selftest
+          scripts/test-independent-verifier-bounds.sh
+          scripts/test-independent-verifier-consistency.sh sealed.anubis tampered.anubis
+          python docs/verify/anubis-verify.py sealed.anubis
           if sh docs/verify/openssl-verify.sh tampered.anubis 2>/dev/null; then
             echo "OpenSSL verifier accepted a tampered container"; exit 1
           fi
-          echo "independent verifier agrees: ok"
+          if python docs/verify/anubis-verify.py tampered.anubis 2>/dev/null; then
+            echo "independent Python verifier accepted a tampered container"; exit 1
+          fi
+          echo "independent OpenSSL and Python verifiers agree: ok"
 
   desktop:
     name: desktop app

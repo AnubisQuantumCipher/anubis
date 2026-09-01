@@ -7,7 +7,8 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::fs::File;
+use std::io::{ErrorKind, Read, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -33,14 +34,49 @@ pub fn now_iso() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+fn open_log(read: bool, append: bool, create: bool) -> std::io::Result<File> {
+    crate::paths::ensure_state_dir().map_err(std::io::Error::other)?;
+    let path = crate::paths::audit_path().map_err(std::io::Error::other)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(read).append(append).create(create);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::other("audit path is not a regular file"));
+        }
+        if metadata.nlink() != 1 {
+            return Err(std::io::Error::other("audit path must not be hard-linked"));
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let file = options.open(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other("audit path is not a regular file"));
+        }
+        Ok(file)
+    }
+}
+
+fn read_log() -> Result<Option<String>> {
+    let mut file = match open_log(true, false, false) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(Some(text))
+}
+
 /// Append one record. Never fails the operation it is recording.
 pub fn append(rec: &Record) {
-    let Ok(path) = crate::paths::audit_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let Ok(line) = serde_json::to_string(rec) else {
         return;
     };
@@ -48,25 +84,16 @@ pub fn append(rec: &Record) {
     // every path that has ever been encrypted or decrypted on this machine --
     // no key material, but a map of what the operator considered worth
     // protecting, which is not something to leave world readable.
-    let mut open = std::fs::OpenOptions::new();
-    open.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.mode(0o600);
-    }
-    if let Ok(mut f) = open.open(&path) {
+    if let Ok(mut f) = open_log(false, true, true) {
         let _ = writeln!(f, "{line}");
     }
 }
 
 /// Read the most recent `limit` records, newest first.
 pub fn recent(limit: usize) -> Result<Vec<Record>> {
-    let path = crate::paths::audit_path()?;
-    if !path.exists() {
+    let Some(text) = read_log()? else {
         return Ok(Vec::new());
-    }
-    let text = std::fs::read_to_string(&path)?;
+    };
     let mut out: Vec<Record> = text
         .lines()
         .filter_map(|l| serde_json::from_str::<Record>(l).ok())
@@ -78,11 +105,9 @@ pub fn recent(limit: usize) -> Result<Vec<Record>> {
 
 /// Totals across the whole log.
 pub fn counts() -> Result<(usize, usize, usize)> {
-    let path = crate::paths::audit_path()?;
-    if !path.exists() {
+    let Some(text) = read_log()? else {
         return Ok((0, 0, 0));
-    }
-    let text = std::fs::read_to_string(&path)?;
+    };
     let mut enc = 0;
     let mut dec = 0;
     let mut failed = 0;

@@ -26,6 +26,13 @@ void FileView::setWatchChanges(bool watch) {
   rewatch();
 }
 
+void FileView::setReadContents(bool read) {
+  if (mReadContents == read) return;
+  mReadContents = read;
+  emit readContentsChanged();
+  reload();
+}
+
 void FileView::setPrintErrors(bool print) {
   if (mPrintErrors == print) return;
   mPrintErrors = print;
@@ -39,6 +46,9 @@ void FileView::reload() {
   QFile file(mPath);
   if (mPath.isEmpty() || !file.exists()) {
     mExists = false;
+    mText.clear();
+  } else if (!mReadContents) {
+    mExists = true;
     mText.clear();
   } else if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
     mExists = true;
@@ -66,7 +76,14 @@ void FileView::rewatch() {
   if (!dir.isEmpty() && QDir(dir).exists()) mWatcher.addPath(dir);
 }
 
-void FileView::onWatchFired() {
+void FileView::onWatchFired(const QString& changedPath) {
+  // Directory watches exist to notice atomic replacement. Ignore unrelated
+  // sibling churn while the exact file watch is still armed; otherwise a new
+  // file in the same directory would invalidate a sound inspection.
+  const bool exactFileEvent = changedPath == mPath;
+  const bool fileWatchWasDropped = !mWatcher.files().contains(mPath);
+  if (!exactFileEvent && !fileWatchWasDropped) return;
+
   // Re-arm: a replaced inode drops the file watch even though the path is
   // still meaningful.
   QTimer::singleShot(0, this, [this] {

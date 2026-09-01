@@ -20,6 +20,7 @@ class FileView : public QObject {
 
   Q_PROPERTY(QString path READ path WRITE setPath NOTIFY pathChanged)
   Q_PROPERTY(bool watchChanges READ watchChanges WRITE setWatchChanges NOTIFY watchChangesChanged)
+  Q_PROPERTY(bool readContents READ readContents WRITE setReadContents NOTIFY readContentsChanged)
   Q_PROPERTY(bool printErrors READ printErrors WRITE setPrintErrors NOTIFY printErrorsChanged)
   Q_PROPERTY(bool exists READ exists NOTIFY loaded)
 
@@ -31,6 +32,9 @@ public:
 
   [[nodiscard]] bool watchChanges() const { return mWatch; }
   void setWatchChanges(bool watch);
+
+  [[nodiscard]] bool readContents() const { return mReadContents; }
+  void setReadContents(bool read);
 
   [[nodiscard]] bool printErrors() const { return mPrintErrors; }
   void setPrintErrors(bool print);
@@ -46,18 +50,20 @@ public:
 signals:
   void pathChanged();
   void watchChangesChanged();
+  void readContentsChanged();
   void printErrorsChanged();
   void loaded();
   void fileChanged();
 
 private:
   void rewatch();
-  void onWatchFired();
+  void onWatchFired(const QString& changedPath);
 
   QFileSystemWatcher mWatcher;
   QString mPath;
   QString mText;
   bool mWatch = false;
+  bool mReadContents = true;
   bool mPrintErrors = true;
   bool mExists = false;
 };

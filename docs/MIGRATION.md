@@ -277,15 +277,25 @@ Never delete an old file until you have decrypted its replacement and compared
 the plaintext. Compare with `cmp`, do not eyeball.
 
 ```sh
-anubis-rage -d -i ~/.config/anubis-rage/identity.txt secret.age > /tmp/old.out
-anubis decrypt --identity default secret.anubis --output /tmp/new.out
+SCRATCH="$(mktemp -d "${TMPDIR:-/dev/shm}/anubis-compare.XXXXXX")"
+cleanup() {
+    case "$SCRATCH" in
+        "${TMPDIR:-/dev/shm}"/anubis-compare.*) find "$SCRATCH" -xdev -depth -delete ;;
+        *) echo "refusing unsafe scratch cleanup: $SCRATCH" >&2; return 1 ;;
+    esac
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-if cmp -s /tmp/old.out /tmp/new.out; then
+anubis-rage -d -i ~/.config/anubis-rage/identity.txt secret.age > "$SCRATCH/old.out"
+anubis decrypt --identity default secret.anubis --output "$SCRATCH/new.out"
+
+if cmp -s "$SCRATCH/old.out" "$SCRATCH/new.out"; then
     echo "OK, plaintexts identical"
 else
     echo "MISMATCH, keep the old file"
 fi
-rm -f /tmp/old.out /tmp/new.out
 ```
 
 Put the scratch files on a `tmpfs` if the plaintext is sensitive, and remove
@@ -295,82 +305,252 @@ compares without either plaintext reaching a filesystem, under `bash`.
 
 ### 4.4 Bulk migration
 
-POSIX sh. Safe by construction: it never deletes an input, removes partial
-output on any failure, and round-trips every result before calling it good.
+Bash. Safe by construction: it never deletes an input, never overwrites a
+destination, and round-trips every result before calling it good. It cleans
+private staging on ordinary exits and the caught `INT` and `TERM` signals; as
+with any shell script, `SIGKILL`, power loss, or a system crash can leave
+scratch artifacts.
 
 ```sh
-#!/bin/sh
+#!/usr/bin/env bash
 # migrate-anubis.sh -- re-encrypt every *.age file under a directory tree.
 # Verifies each result by round trip. Never deletes an input.
-set -eu
+set -euo pipefail
+umask 077
 
 SRC_DIR="${1:?usage: migrate-anubis.sh DIRECTORY}"
 OLD_IDENTITY="${OLD_IDENTITY:-$HOME/.config/anubis-rage/identity.txt}"
 IDENTITY="${IDENTITY:-default}"
 
-[ -d "$SRC_DIR" ]     || { echo "not a directory: $SRC_DIR" >&2; exit 1; }
-[ -f "$OLD_IDENTITY" ] || { echo "no old identity at $OLD_IDENTITY" >&2; exit 1; }
+[ -d "$SRC_DIR" ] || { printf 'not a directory: %q\n' "$SRC_DIR" >&2; exit 1; }
+[ -f "$OLD_IDENTITY" ] || {
+    printf 'no old identity at %q\n' "$OLD_IDENTITY" >&2
+    exit 1
+}
 command -v anubis-rage >/dev/null 2>&1 || { echo "anubis-rage not found" >&2; exit 1; }
 command -v anubis      >/dev/null 2>&1 || { echo "anubis not found" >&2; exit 1; }
 command -v jq          >/dev/null 2>&1 || { echo "jq not found" >&2; exit 1; }
 
-RECIPIENT="$(anubis status --json \
-    | jq -r --arg n "$IDENTITY" '.identities[] | select(.name==$n) | .recipient')"
-[ -n "$RECIPIENT" ] || { echo "no identity named $IDENTITY" >&2; exit 1; }
+# Prefix a relative starting point so a directory named like an option remains
+# a path when it reaches `find` and the old command-line parser.
+case "$SRC_DIR" in
+    /*) ;;
+    *) SRC_DIR="./$SRC_DIR" ;;
+esac
 
-SCRATCH="$(mktemp -d "${TMPDIR:-/dev/shm}/anubis-mig.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT INT TERM
+SCRATCH_PREFIX="${TMPDIR:-/dev/shm}/anubis-mig."
+SCRATCH=""
+ACTIVE_CASE=""
+ACTIVE_PUBLISH_DIR=""
+ACTIVE_PUBLISH_FILE=""
 
-# Collect the file list first, so the loop body runs in this shell and the
-# counters survive it.
-find "$SRC_DIR" -type f -name '*.age' > "$SCRATCH/list"
+cleanup_case() {
+    local failed=0
+
+    if [ -n "$ACTIVE_PUBLISH_FILE" ]; then
+        if rm -f -- "$ACTIVE_PUBLISH_FILE" 2>/dev/null; then
+            ACTIVE_PUBLISH_FILE=""
+        else
+            echo "could not remove an adjacent publication stage" >&2
+            failed=1
+        fi
+    fi
+    if [ -n "$ACTIVE_PUBLISH_DIR" ]; then
+        if rmdir -- "$ACTIVE_PUBLISH_DIR" 2>/dev/null; then
+            ACTIVE_PUBLISH_DIR=""
+        else
+            echo "could not remove an adjacent publication directory" >&2
+            failed=1
+        fi
+    fi
+    if [ -n "$ACTIVE_CASE" ]; then
+        case "$ACTIVE_CASE" in
+            "$SCRATCH"/item.*)
+                if find "$ACTIVE_CASE" -xdev -depth -delete 2>/dev/null; then
+                    ACTIVE_CASE=""
+                else
+                    echo "could not remove a private per-file stage" >&2
+                    failed=1
+                fi
+                ;;
+            *)
+                echo "refusing unsafe per-file cleanup" >&2
+                failed=1
+                ;;
+        esac
+    fi
+
+    return "$failed"
+}
+
+cleanup() {
+    local saved_status=$?
+    trap - EXIT INT TERM
+
+    if ! cleanup_case && [ "$saved_status" -eq 0 ]; then
+        saved_status=1
+    fi
+    if [ -n "$SCRATCH" ]; then
+        case "$SCRATCH" in
+            "$SCRATCH_PREFIX"*)
+                if ! find "$SCRATCH" -xdev -depth -delete 2>/dev/null; then
+                    echo "could not remove the private migration scratch directory" >&2
+                    if [ "$saved_status" -eq 0 ]; then saved_status=1; fi
+                fi
+                ;;
+            *)
+                echo "refusing unsafe scratch cleanup" >&2
+                if [ "$saved_status" -eq 0 ]; then saved_status=1; fi
+                ;;
+        esac
+    fi
+
+    exit "$saved_status"
+}
+
+if ! SCRATCH="$(mktemp -d "${SCRATCH_PREFIX}XXXXXX" 2>/dev/null)"; then
+    echo "could not create a private migration scratch directory" >&2
+    exit 1
+fi
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! STATUS="$(anubis status --json 2> "$SCRATCH/status.err")"; then
+    echo "could not read ANUBIS identity status" >&2
+    exit 1
+fi
+if ! RECIPIENT="$(printf '%s' "$STATUS" | jq -er --arg n "$IDENTITY" '
+        [.identities[] | select(.name == $n)]
+        | if length == 1 and (.[0].recipient | type == "string" and length > 0)
+          then .[0].recipient else error("identity selection failed") end
+    ' 2> "$SCRATCH/jq.err")"; then
+    printf 'could not select exactly one recipient for identity %q\n' \
+        "$IDENTITY" >&2
+    exit 1
+fi
+if ! SIGNER="$(printf '%s' "$STATUS" | jq -er --arg n "$IDENTITY" '
+        [.identities[] | select(.name == $n)]
+        | if length == 1
+             and (.[0].signing_fingerprint | type == "string" and length > 0)
+          then .[0].signing_fingerprint
+          else error("signer selection failed") end
+    ' 2> "$SCRATCH/jq.err")"; then
+    printf 'could not select exactly one signer for identity %q\n' \
+        "$IDENTITY" >&2
+    exit 1
+fi
+
+# Materialize a NUL-delimited inventory inside the private scratch directory.
+# `set -e` therefore makes an unreadable or changing source tree authoritative
+# instead of letting a failed process substitution look like end-of-input.
+if ! find "$SRC_DIR" -type f -name '*.age' -print0 \
+        > "$SCRATCH/list" 2> "$SCRATCH/find.err"; then
+    printf 'could not inventory source tree %q\n' "$SRC_DIR" >&2
+    exit 1
+fi
 
 ok=0
 fail=0
 skip=0
 
-while IFS= read -r old; do
+while IFS= read -r -d '' old; do
     new="${old%.age}.anubis"
 
-    if [ -e "$new" ]; then
-        echo "SKIP   $old (target exists)"
+    if [ -e "$new" ] || [ -L "$new" ]; then
+        printf 'SKIP   %q (target exists)\n' "$old"
         skip=$((skip + 1))
+        continue
+    fi
+
+    if ! ACTIVE_CASE="$(mktemp -d "$SCRATCH/item.XXXXXX" 2>/dev/null)"; then
+        printf 'FAIL   %q (could not create private per-file stage)\n' "$old"
+        fail=$((fail + 1))
         continue
     fi
 
     # Stage the plaintext, so an old-tool failure is caught before any
     # output file exists.
-    if ! anubis-rage -d -i "$OLD_IDENTITY" "$old" \
-            > "$SCRATCH/plain" 2> "$SCRATCH/err"; then
-        echo "FAIL   $old (old decrypt: $(tr '\n' ' ' < "$SCRATCH/err"))"
+    if ! anubis-rage -d -i "$OLD_IDENTITY" -- "$old" \
+            > "$ACTIVE_CASE/plain" 2> "$ACTIVE_CASE/err"; then
+        printf 'FAIL   %q (old decrypt failed)\n' "$old"
         fail=$((fail + 1))
+        cleanup_case || exit 1
         continue
     fi
 
     if ! anubis encrypt --recipient "$RECIPIENT" --sign \
-            "$SCRATCH/plain" --output "$new" 2> "$SCRATCH/err"; then
-        echo "FAIL   $old (new encrypt: $(tr '\n' ' ' < "$SCRATCH/err"))"
-        rm -f "$new"
+            --identity "$IDENTITY" --output "$ACTIVE_CASE/sealed" \
+            -- "$ACTIVE_CASE/plain" 2> "$ACTIVE_CASE/err"; then
+        printf 'FAIL   %q (new encrypt failed)\n' "$old"
         fail=$((fail + 1))
+        cleanup_case || exit 1
         continue
     fi
 
-    if ! anubis decrypt --identity "$IDENTITY" "$new" \
-            --output "$SCRATCH/check" 2> "$SCRATCH/err"; then
-        echo "FAIL   $old (new decrypt: $(tr '\n' ' ' < "$SCRATCH/err"))"
-        rm -f "$new"
+    if ! anubis decrypt --identity "$IDENTITY" --signer "$SIGNER" \
+            --output "$ACTIVE_CASE/check" -- "$ACTIVE_CASE/sealed" \
+            2> "$ACTIVE_CASE/err"; then
+        printf 'FAIL   %q (new decrypt or signer check failed)\n' "$old"
         fail=$((fail + 1))
+        cleanup_case || exit 1
         continue
     fi
 
-    if cmp -s "$SCRATCH/plain" "$SCRATCH/check"; then
-        echo "OK     $old -> $new"
-        ok=$((ok + 1))
-    else
-        echo "FAIL   $old (round trip mismatch)"
-        rm -f "$new"
+    if ! cmp -s "$ACTIVE_CASE/plain" "$ACTIVE_CASE/check"; then
+        printf 'FAIL   %q (round trip mismatch)\n' "$old"
         fail=$((fail + 1))
+        cleanup_case || exit 1
+        continue
     fi
+
+    # Preserve trailing newlines in directory names; command substitution with
+    # `dirname` would strip them and could publish into the wrong directory.
+    case "$new" in
+        */*) new_dir="${new%/*}" ;;
+        *) new_dir="." ;;
+    esac
+
+    # Build inside an adjacent private directory. This keeps the publication
+    # source on the destination filesystem and denies peers access through the
+    # stage itself before the no-clobber hard-link operation.
+    if ! ACTIVE_PUBLISH_DIR="$(
+            mktemp -d "$new_dir/.anubis-migrate.XXXXXX" 2> "$ACTIVE_CASE/err"
+        )"; then
+        printf 'FAIL   %q (could not create adjacent publication stage)\n' "$old"
+        fail=$((fail + 1))
+        cleanup_case || exit 1
+        continue
+    fi
+    ACTIVE_PUBLISH_FILE="$ACTIVE_PUBLISH_DIR/sealed"
+    if ! cp -- "$ACTIVE_CASE/sealed" "$ACTIVE_PUBLISH_FILE" \
+            2> "$ACTIVE_CASE/err" \
+            || ! chmod 0600 "$ACTIVE_PUBLISH_FILE" 2> "$ACTIVE_CASE/err"; then
+        printf 'FAIL   %q (could not stage encrypted output)\n' "$old"
+        fail=$((fail + 1))
+        cleanup_case || exit 1
+        continue
+    fi
+    # GNU `ln -T` must treat `new` as the destination name even if a directory
+    # or a symlink to one appears between the earlier check and this call.
+    if ! ln -T -- "$ACTIVE_PUBLISH_FILE" "$new" 2> "$ACTIVE_CASE/err"; then
+        if [ -e "$new" ] || [ -L "$new" ]; then
+            printf 'SKIP   %q (target appeared before publication)\n' "$old"
+            skip=$((skip + 1))
+        else
+            printf 'FAIL   %q (atomic publication failed)\n' "$old"
+            fail=$((fail + 1))
+        fi
+        cleanup_case || exit 1
+        continue
+    fi
+
+    if ! cleanup_case; then
+        printf 'FAIL   %q (output published, but staging cleanup failed)\n' "$old"
+        exit 1
+    fi
+    printf 'OK     %q -> %q\n' "$old" "$new"
+    ok=$((ok + 1))
 done < "$SCRATCH/list"
 
 echo "done: $ok migrated, $fail failed, $skip skipped"
@@ -388,18 +568,32 @@ chmod +x migrate-anubis.sh
 The deliberate choices, since they are the difference between this script and a
 dangerous one:
 
-- The file list is written to a scratch file and the loop reads from it via
-  redirection, so the loop body runs in the current shell and the counters are
-  still correct at the end. A `find | while read` pipeline would run the body
-  in a subshell and silently discard them.
+- `find -print0` and `read -d ''` preserve every valid filename, including
+  whitespace and embedded newlines. The private inventory file keeps the loop
+  in the current shell so the counters remain correct, and a failed `find`
+  stops the script before migration begins.
 - The intermediate plaintext goes to a scratch directory rather than through a
   pipe, so a failure in the old tool is detected before any output file exists.
-  Piping would work -- `anubis encrypt` accepts `-` -- but POSIX `sh` has no
-  `pipefail`, so a pipeline here could not distinguish a truncated stream from a
-  complete one. This is a portability constraint of the script, not a
-  limitation of the tool.
-- A partial output file is removed on every failure path.
-- Every result is decrypted and compared before being reported `OK`.
+  Piping would work -- `anubis encrypt` accepts `-` -- but staging keeps the
+  old-tool failure and the new-tool failure as separate checked operations.
+- Every file gets a fresh private staging directory, so check output from one
+  item cannot block or contaminate the next item.
+- Encryption names the intended signing identity, and the staged result must
+  decrypt with that exact signer before publication.
+- Publication uses a file inside an adjacent private directory and an atomic
+  hard-link create. A destination that already exists, including a dangling
+  symlink, or appears concurrently is never overwritten and never removed; no
+  partial destination is published during an ordinary process failure.
+- The caught `INT` and `TERM` signals run the same bounded cleanup as ordinary
+  exits. `SIGKILL`, power loss, and system crashes cannot run a shell trap, so
+  they may leave a private scratch directory or hidden `.anubis-migrate.*`
+  directory. Such an interruption still cannot overwrite an existing
+  destination, but the user must inspect any residue before removing it.
+- The destination directory must be under the migrating user's control. No
+  shell script can protect a final name in a directory an adversary is allowed
+  to rename or remove entries from; benign concurrent destination creation is
+  handled safely, but a hostile shared-writable directory is out of scope.
+- Every staged result is decrypted and compared before being reported `OK`.
 - No input is ever deleted, and the script exits non-zero if anything failed.
 
 ### 4.5 After migration
@@ -496,11 +690,13 @@ omitted entirely.
 
 There is no verify flag because there is nothing to opt into: if the file
 carries a signature, `decrypt` verifies it before writing any plaintext and
-fails if it does not check out. Read the `signed` and `signer_fingerprint`
-fields of `inspect --json` if you need to act on who signed a file, and use
-`decrypt --require-signature` or `decrypt --signer FINGERPRINT` if you need to
-*insist* on it -- a recipient can strip a signature, so checking after the fact
-is weaker than making it a precondition. See `SECURITY.md` section 2.4.
+fails if it does not check out. Use `anubis verify --signer FINGERPRINT` for a
+keyless, content-bound signer check. `inspect` reports only signature presence
+and the key claimed by the unverified header; its `signature_ok` field is
+`null`. Use `decrypt --require-signature` or `decrypt --signer FINGERPRINT` if
+plaintext publication must depend on sender authentication -- a recipient can
+strip a signature, so checking after the fact is weaker than making it a
+precondition. See `SECURITY.md` section 2.4.
 
 ### 5.4 Key generation
 
@@ -535,7 +731,7 @@ already-encrypted file. Now signing happens during encryption, in one pass.
 | anubis-rage 1.4.0 | ANUBIS 2.0.0 |
 |---|---|
 | `anubis-rage-sign sign -k KEY -i IN -o OUT` | `anubis encrypt --sign` |
-| `anubis-rage-sign verify -k KEY -i IN -o OUT` | automatic on `decrypt`; `anubis inspect` to check without decrypting |
+| `anubis-rage-sign verify -k KEY -i IN -o OUT` | `anubis verify --signer FINGERPRINT IN`; also automatic for a signature present during `decrypt` |
 
 Two substantive differences beyond the ergonomics:
 
@@ -556,15 +752,21 @@ anubis-rage-sign sign -k signing.key -i tmp.age -o out.age
 # ANUBIS 2.0.0: one pass
 anubis encrypt -r anubis1... --sign -o out.anubis in.txt
 
-# Inspect without decrypting
+# Verify the complete container without decrypting
+anubis verify out.anubis
+anubis verify --signer CONFIRMED-FINGERPRINT out.anubis
+
+# Inspect structure without making a signature-validity claim
 anubis inspect out.anubis
 anubis inspect out.anubis --json | jq '{format, signed, signer_fingerprint, payload_bytes}'
 ```
 
-There is no separate verify step to remember: `anubis decrypt` verifies the
-signature when one is present, before writing any plaintext. Read the `signed`
-and `signer_fingerprint` JSON fields if your workflow needs to act on who
-signed a file, and pass `--signer FINGERPRINT` if the workflow depends on it.
+`anubis decrypt` verifies a signature when one is present, before writing any
+plaintext. It deliberately accepts an absent signature unless the caller adds
+`--require-signature` or `--signer FINGERPRINT`. For a check that does not
+decrypt, use `anubis verify`; its exit status and `signature_ok` field cover the
+complete container. Never authorize a sender from `inspect`'s `signed` or
+`signer_fingerprint` fields: those are unverified header claims.
 
 ### 5.6 Machine-readable output
 
@@ -600,7 +802,8 @@ anubis status
 ```
 
 `install.sh` puts the binary in `~/.local/bin`, creates
-`~/.config/anubis/identities` at mode 700 and `~/.local/state/anubis`, and
+`~/.config/anubis`, its identity directory, and `~/.local/state/anubis` at mode
+700, and
 registers the `khephri.anubis` bar widget in `~/.config/omarchy/shell.json`
 after taking a timestamped backup. It is idempotent.
 

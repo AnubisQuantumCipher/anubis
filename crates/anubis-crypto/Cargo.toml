@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+anubis-v4-core = { path = "../anubis-v4-core" }
 base64 = "0.23.1"
 bech32 = "0.12.0"
 chacha20poly1305 = "0.11.0"

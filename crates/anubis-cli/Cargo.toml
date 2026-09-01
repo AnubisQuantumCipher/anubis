@@ -19,6 +19,9 @@ signal-hook = "0.3.18"
 subtle = "2.6.1"
 toml = "1.1.4"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.183"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 

@@ -10,11 +10,26 @@ tested implementations ship alongside it:
 
 | | |
 |---|---|
-| [`verify/openssl-verify.sh`](verify/openssl-verify.sh) | POSIX shell + stock OpenSSL ≥ 3.5. No ANUBIS code, no Rust, no Python. |
+| [`verify/openssl-verify.sh`](verify/openssl-verify.sh) | POSIX shell + Linux `/proc` + stock OpenSSL ≥ 3.5. No ANUBIS code, no Rust, no Python. |
 | [`verify/anubis-verify.py`](verify/anubis-verify.py) | Python 3 standard library, shelling out to `openssl` for the ML-DSA primitive. Written from the specification alone. |
 
 Both refuse a tampered container and both agree with `anubis verify` on every
 case in their test matrices.
+
+Resource behavior is bounded deliberately. The Python verifier reads only the
+maximum header prefix and streams a binary payload into SHA-512; armor remains
+whole-buffered under the format's armor cap, but its lines are scanned without
+materialising an attacker-sized list. The shell verifier opens the input once,
+routes every utility through that Linux descriptor, rejects in-place metadata
+changes, streams the signed preimage, and never retains a second
+container-sized copy. Supplying its optional work-directory argument creates a
+fresh private child beneath that directory, so fixed intermediate names cannot
+follow pre-planted links.
+
+The CI matrix also replaces the caller's input symlink in the middle of the
+shell transcript check and requires the result to remain bound to the file
+handle opened at startup. This is a regression test for consistency, not a
+claim that mutable filesystems provide immutable snapshots.
 
 ---
 
@@ -90,6 +105,13 @@ The three steps that are not obvious:
 newline, so `header_len` is that offset plus 91. The verifying key is the 3456
 base64 characters after the literal `-> mldsa87 `. Because 2592 is divisible
 by 3, the unpadded base64 needs no `=` repair.
+
+That deliberately small shell recipe is an independent signature-transcript
+check, not a complete ANUBIS grammar validator. A valid signature over
+non-canonical or otherwise malformed header bytes can still be cryptographically
+valid. Use the independent Python parser or `anubis verify` when structural
+validity is also required; neither can check the keyed header MAC without a
+recipient identity.
 
 **Wrap the key.** OpenSSL wants a DER `SubjectPublicKeyInfo`, with OID
 `2.16.840.1.101.3.4.3.19` and the parameters field **absent** (not NULL). The

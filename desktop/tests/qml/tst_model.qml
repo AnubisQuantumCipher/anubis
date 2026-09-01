@@ -335,4 +335,124 @@ TestCase {
     verify(!Model.inspectRecordAccepted(
              unsignedWithSigner, 0, true, 1, "", path))
   }
+
+  function test_structuredPathsRemainExactAndFreeFormParsingStaysExplicit() {
+    var exact = " /tmp/\"quoted\"\ncontainer.anubis "
+    compare(Model.exactPath(exact), exact)
+    compare(Model.exactPath(null), "")
+    compare(Model.pathForAction(exact, "/tmp/new", false, "/home/tester"),
+            exact)
+    compare(Model.pathForAction("/tmp/old", "  /tmp/new  ", true,
+                                "/home/tester"),
+            "/tmp/new")
+
+    compare(Model.normalizePath("  '~/sealed.anubis'  ", "/home/tester"),
+            "/home/tester/sealed.anubis")
+    compare(Model.normalizePath("file:///tmp/sealed%20file.anubis",
+                                "/home/tester"),
+            "/tmp/sealed file.anubis")
+  }
+
+  function test_decryptPolicyAlwaysPinsContentAndSeparatesSignaturePolicy() {
+    var path = " /tmp/sealed.anubis "
+    var inspect = inspectRecord(path, false)
+    var content = Model.contentId(inspect)
+
+    var compatible = Model.decryptPolicy(path, path, inspect, null, false, "")
+    verify(compatible.ok)
+    compare(compatible.content_id, content)
+    verify(!compatible.require_signature)
+    compare(compatible.signer, "")
+    compare(Model.decryptPolicyArguments(compatible).join("|"),
+            "--expect-content-id|" + content)
+    verify(Model.decryptPolicyStillCurrent(compatible, content))
+    verify(!Model.decryptPolicyStillCurrent(compatible,
+                                             repeated("b", 128)))
+
+    var required = Model.decryptPolicy(path, path, inspect, null, true, "")
+    verify(required.ok)
+    verify(required.require_signature)
+    compare(required.signer, "")
+
+    var pin = "AAAA-BBBB-CCCC-DDDD-EEEE"
+    var pinned = Model.decryptPolicy(path, path, inspect, null, false, pin)
+    verify(pinned.ok)
+    verify(pinned.require_signature)
+    compare(pinned.signer, pin)
+    compare(Model.decryptPolicyArguments(pinned).join("|"),
+            "--expect-content-id|" + content
+              + "|--require-signature|--signer|" + pin)
+
+    verify(!Model.decryptPolicy(path, "/tmp/other.anubis", inspect,
+                                null, false, "").ok)
+    verify(!Model.decryptPolicy("/tmp/sealed.anubis", path, inspect,
+                                null, false, "").ok)
+    verify(!Model.decryptPolicy(path, path, inspect, null, false,
+                                "not a fingerprint").ok)
+    verify(!Model.decryptPolicy(path, path, inspect, null, false,
+                                "pin:" + pin).ok)
+
+    var noContent = inspectRecord(path, false)
+    noContent.content_id = ""
+    verify(!Model.decryptPolicy(path, path, noContent, null, false, "").ok)
+  }
+
+  function test_verifiedSignerRetainsAutomaticDecryptPin() {
+    var path = "/tmp/signed.anubis"
+    var inspect = inspectRecord(path, true)
+    var signer = Model.signerFingerprint(inspect)
+    var attested = {
+      content_id: Model.contentId(inspect),
+      fingerprint: signer,
+      ok: true
+    }
+
+    var policy = Model.decryptPolicy(path, path, inspect, attested, false, "")
+    verify(policy.ok)
+    verify(policy.require_signature)
+    compare(policy.signer, signer)
+
+    attested.content_id = repeated("b", 128)
+    policy = Model.decryptPolicy(path, path, inspect, attested, false, "")
+    verify(policy.ok)
+    verify(!policy.require_signature)
+    compare(policy.signer, "")
+  }
+
+  function test_authorshipRequiresSuccessfulBoundAttestation() {
+    var path = "/tmp/signed.anubis"
+    var inspect = inspectRecord(path, true)
+    var signer = Model.signerFingerprint(inspect)
+    var status = completeStatus()
+    status.identities = [{
+      name: "alice",
+      signing_fingerprint: signer
+    }]
+
+    var attribution = Model.signerAttribution(status, inspect, null)
+    verify(!attribution.verified)
+    compare(attribution.text,
+            "header claims a signing key matching your identity \"alice\"")
+
+    var attested = {
+      content_id: Model.contentId(inspect),
+      fingerprint: signer,
+      ok: false
+    }
+    attribution = Model.signerAttribution(status, inspect, attested)
+    verify(!attribution.verified)
+    compare(attribution.text,
+            "header claims a signing key matching your identity \"alice\"")
+
+    attested.ok = true
+    attribution = Model.signerAttribution(status, inspect, attested)
+    verify(attribution.verified)
+    compare(attribution.text, "signed by your identity \"alice\"")
+
+    attested.content_id = repeated("b", 128)
+    attribution = Model.signerAttribution(status, inspect, attested)
+    verify(!attribution.verified)
+    compare(attribution.text,
+            "header claims a signing key matching your identity \"alice\"")
+  }
 }

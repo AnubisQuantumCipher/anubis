@@ -138,20 +138,16 @@ Item {
     sigAttested = nextSig
   }
 
-  function verifiedDecryptPolicyForPath(path) {
-    var target = Model.normalizePath(path, home)
-    if (target === "" || target !== inspectPath || !inspectResult) return null
-    var attested = sigAttestedFor(inspectResult)
-    if (!attested || attested.ok !== true) return null
-    var signer = Model.formatFingerprint(attested.fingerprint)
-    var contentId = Model.contentId(inspectResult)
-    return Model.validFingerprint(signer) && contentId !== ""
-      ? { signer: signer, content_id: contentId } : null
+  function decryptPolicyForPath(path, requireSignature, signerPin) {
+    return Model.decryptPolicy(
+      path, inspectPath, inspectResult, sigAttestedFor(inspectResult),
+      requireSignature, signerPin)
   }
 
   function retainDecryptAttestations(result) {
     var contentId = Model.contentId(result)
-    var target = Model.normalizePath(String(result.path || opInput), home)
+    var target = Model.exactPath(result && result.path !== undefined
+                                 ? result.path : opInput)
     if (contentId === "") {
       opError = "Decryption completed, but the engine returned no valid "
         + "content_id; no authentication attestation was retained."
@@ -194,7 +190,7 @@ Item {
   // header, so this decrypts nothing and needs no identity -- it works on a
   // container addressed to somebody else.
   function verifySignature(path) {
-    var p = Model.normalizePath(path, home)
+    var p = Model.exactPath(path)
     if (p === "") return
     if (engineMissing || enginePath === "") {
       actionError = "The anubis engine is not installed."
@@ -403,9 +399,9 @@ Item {
   // Build the request without running it, so the overwrite gate and the UI
   // both see exactly what would be executed.
   function buildRequest(kind, inputPath, recipientKeys, sign, identityName,
-                        outputPath) {
-    var input = Model.normalizePath(inputPath, home)
-    var out = String(outputPath || "")
+                        outputPath, requireSignature, signerPin) {
+    var input = Model.exactPath(inputPath)
+    var out = Model.exactPath(outputPath)
     if (out === "") out = Model.outputFor(kind, input)
     return {
       kind: kind,
@@ -413,7 +409,9 @@ Item {
       output: out,
       recipients: recipientKeys || [],
       sign: sign === true,
-      identity: String(identityName || "")
+      identity: String(identityName || ""),
+      require_signature: requireSignature === true,
+      signer: String(signerPin || "")
     }
   }
 
@@ -426,6 +424,16 @@ Item {
       return "Select at least one recipient."
     if (req.kind === "encrypt" && req.sign && !canSign)
       return "No identity with signing material; generate one first."
+    if (req.kind === "decrypt") {
+      var policy = decryptPolicyForPath(
+        req.input, req.require_signature, req.signer)
+      if (!policy.ok) return policy.error
+      var expectedId = String(req.expected_content_id || "")
+      if (expectedId !== ""
+          && !Model.decryptPolicyStillCurrent(policy, expectedId))
+        return "The container changed after decrypt was requested; review "
+          + "the new inspection and try again."
+    }
     if (req.output === req.input)
       return "Refusing to write the output over its own input."
     return ""
@@ -440,6 +448,16 @@ Item {
     actionError = ""
     var refusal = requestRefusal(req)
     if (refusal !== "") { opError = refusal; return }
+    if (req.kind === "decrypt") {
+      var policy = decryptPolicyForPath(
+        req.input, req.require_signature, req.signer)
+      // Park the effective policy, not only the visible controls. In
+      // particular, a signer inherited from a successful verification must
+      // neither disappear nor be replaced while overwrite confirmation is up.
+      req.expected_content_id = policy.content_id
+      req.bound_require_signature = policy.require_signature
+      req.bound_signer = policy.signer
+    }
     pendingOverwrite = null
     if (!opts.confirmOverwrite) { launch(req, false); return }
     // Existence only. Nothing is read, nothing is written, and the answer
@@ -462,6 +480,19 @@ Item {
   }
 
   function launch(req, force) {
+    // Confirmation can leave a request parked while the selected file changes.
+    // Re-evaluate every boundary immediately before spawning the engine.
+    var refusal = requestRefusal(req)
+    if (refusal !== "") { opError = refusal; return }
+    if (req.kind === "decrypt"
+        && String(req.expected_content_id || "") === "") {
+      var livePolicy = decryptPolicyForPath(
+        req.input, req.require_signature, req.signer)
+      req.expected_content_id = livePolicy.content_id
+      req.bound_require_signature = livePolicy.require_signature
+      req.bound_signer = livePolicy.signer
+    }
+
     var cmd = [enginePath, req.kind, "--json"]
     if (req.kind === "encrypt") {
       for (var i = 0; i < req.recipients.length; i++)
@@ -469,14 +500,18 @@ Item {
       if (req.sign) cmd.push("--sign")
     }
     if (req.kind === "decrypt") {
-      // If these exact bytes were already verified, carry both immutable
-      // content identity and signer into decrypt. The engine re-checks both
-      // before publication, so neither a same-signer replacement nor a
-      // different signer can cross the inspect-to-decrypt boundary.
-      var policy = verifiedDecryptPolicyForPath(req.input)
-      if (policy)
-        cmd.push("--require-signature", "--signer", policy.signer,
-                 "--expect-content-id", policy.content_id)
+      // Every decrypt is pinned to the exact bytes inspected. Signature
+      // requirements are separate: the operator may demand any signature or
+      // a particular signer, and a prior successful verify retains the old
+      // automatic signer pin.
+      var policy = {
+        ok: true,
+        content_id: String(req.expected_content_id || ""),
+        require_signature: req.bound_require_signature === true,
+        signer: String(req.bound_signer || "")
+      }
+      var policyArgs = Model.decryptPolicyArguments(policy)
+      for (var p = 0; p < policyArgs.length; p++) cmd.push(policyArgs[p])
     }
     if (req.identity !== "") cmd.push("--identity", req.identity)
     cmd.push("-o", req.output)
@@ -577,7 +612,7 @@ Item {
   // ==========================================================================
 
   function runInspect(path) {
-    var p = Model.normalizePath(path, home)
+    var p = Model.exactPath(path)
     if (p === "") return
     inspectGeneration += 1
     inspectPath = p
@@ -629,6 +664,21 @@ Item {
     inspectResult = null
     inspectError = ""
     actionStatus = ""
+  }
+
+  function invalidateInspectedFile() {
+    var target = inspectPath
+    if (target === "") return
+    inspectGeneration += 1
+    queuedInspect = null
+    if (inspectProc.running) inspectProc.running = false
+    verifyGeneration += 1
+    if (verifyProc.running) verifyProc.running = false
+    inspectResult = null
+    reconcileAttestations(target, null)
+    inspectError = "Container changed; inspecting the current bytes again."
+    actionStatus = ""
+    inspectChangeSettle.restart()
   }
 
   function applyInspect(raw, stderrText, exitCode, target, generation) {
@@ -1001,10 +1051,34 @@ Item {
     onFileChanged: stateSettle.restart()
   }
 
+  // The selected container is watched independently of status.json. A change
+  // invalidates inspection and verification immediately; the follow-up read
+  // is debounced for atomic replacement. Contents are not loaded by FileView
+  // because the engine's inspect is the only reader needed here.
+  FileView {
+    id: inspectedFileWatch
+    readContents: false
+    path: root.inspectPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.invalidateInspectedFile()
+  }
+
   Timer {
     id: stateSettle
     interval: 250
     repeat: false
     onTriggered: root.refresh()
+  }
+
+
+  Timer {
+    id: inspectChangeSettle
+    interval: 250
+    repeat: false
+    onTriggered: {
+      var target = root.inspectPath
+      if (target !== "") root.runInspect(target)
+    }
   }
 }

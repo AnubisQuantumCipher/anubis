@@ -13,30 +13,28 @@
 // polling the same engine.
 
 #include <QCommandLineParser>
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QLockFile>
 #include <QQmlApplicationEngine>
 #include <QQmlError>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QUuid>
 #include <QUrl>
 
-#include <unistd.h>
 #include <cstdio>
+#include <memory>
 
 #include "app.hpp"
+#include "openrequest.hpp"
 
 namespace {
-
-QString socketName() {
-  // Per-user, so two people on one machine each get their own vault rather
-  // than one silently steering the other's.
-  return QStringLiteral("anubis-desktop-%1").arg(::getuid());
-}
 
 // Absolute, symlink-resolved where possible. A relative path handed in from a
 // terminal means nothing once it has crossed into another process.
@@ -49,22 +47,43 @@ QString canonicalTarget(const QString& raw) {
   return resolved.isEmpty() ? info.absoluteFilePath() : resolved;
 }
 
-// Hand the path to the instance that is already running. Returns false when
-// there is nothing listening, which is the ordinary first-launch case.
-bool forwardToRunningInstance(const QString& target) {
+// Hand the path to the instance that is already running. The caller
+// distinguishes an absent endpoint from one that accepted a connection but
+// did not return the matching acknowledgement.
+enum class ForwardResult { NoServer, Acknowledged, Unacknowledged };
+
+ForwardResult forwardToRunningInstance(const QString& socketPath,
+                                       const QString& target) {
   QLocalSocket socket;
-  socket.connectToServer(socketName());
-  if (!socket.waitForConnected(300)) return false;
-  // The newline matters. Writing an empty target writes zero bytes, and a
-  // zero-byte write never wakes the other side's readyRead -- so a launch with
-  // no argument connected, proved an instance was alive, and then silently
-  // failed to raise it. The receiving end already trims, so the terminator
-  // costs nothing and makes the empty case a real message.
-  socket.write(target.toUtf8() + '\n');
+  socket.setReadBufferSize(AnubisOpenRequest::MaxFrameBytes + 1);
+  socket.connectToServer(socketPath);
+  if (!socket.waitForConnected(300)) return ForwardResult::NoServer;
+  // A JSON message preserves path whitespace and embedded newlines while also
+  // making an empty target a real non-empty message that raises the window.
+  // The random request ID binds the acknowledgement to this connection.
+  const QString requestId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  const QByteArray request = AnubisOpenRequest::encode(target, requestId);
+  if (request.size() > AnubisOpenRequest::MaxFrameBytes)
+    return ForwardResult::Unacknowledged;
+  socket.write(request);
   socket.flush();
-  socket.waitForBytesWritten(300);
+  if (!socket.waitForBytesWritten(300) && socket.bytesToWrite() != 0)
+    return ForwardResult::Unacknowledged;
+
+  QByteArray response;
+  QDeadlineTimer deadline(300);
+  while (!response.endsWith('\n')) {
+    if (socket.bytesAvailable() == 0
+        && !socket.waitForReadyRead(deadline.remainingTime()))
+      return ForwardResult::Unacknowledged;
+    const QByteArray chunk = socket.readAll();
+    if (chunk.size() > AnubisOpenRequest::MaxFrameBytes - response.size())
+      return ForwardResult::Unacknowledged;
+    response += chunk;
+  }
   socket.disconnectFromServer();
-  return true;
+  return AnubisOpenRequest::decodeAck(response, requestId)
+    ? ForwardResult::Acknowledged : ForwardResult::Unacknowledged;
 }
 
 } // namespace
@@ -92,14 +111,49 @@ int main(int argc, char* argv[]) {
   const QString target = positional.isEmpty() ? QString()
                                               : canonicalTarget(positional.first());
 
-  if (forwardToRunningInstance(target)) return 0;
+  const QString socketPath = AnubisOpenRequest::privateSocketPath();
+  ForwardResult forward = ForwardResult::NoServer;
+  if (!socketPath.isEmpty()) {
+    forward = forwardToRunningInstance(socketPath, target);
+    if (forward == ForwardResult::Acknowledged) return 0;
+  } else {
+    qWarning() << "anubis-desktop: private runtime directory unavailable;"
+               << "single-instance forwarding disabled";
+  }
 
-  // Nothing was listening, so this process becomes the instance. A stale
-  // socket from a crashed run would otherwise block the listen forever.
-  QLocalServer::removeServer(socketName());
+  // Nothing was listening, so this process may become the instance. The lock
+  // serialises the stale-socket check/remove/listen transition: two launches
+  // can no longer unlink each other's newly live socket and split into two
+  // primaries.
   QLocalServer server;
   server.setSocketOptions(QLocalServer::UserAccessOption);
-  if (!server.listen(socketName()))
+  bool serverListening = false;
+  std::unique_ptr<QLockFile> instanceLock;
+  if (!socketPath.isEmpty() && forward == ForwardResult::NoServer) {
+    instanceLock = std::make_unique<QLockFile>(socketPath
+      + QStringLiteral(".lock"));
+    if (instanceLock->tryLock(300)) {
+      // Recheck after winning the launch lock. This also coexists safely with
+      // an older instance that predates the lock but began listening meanwhile.
+      forward = forwardToRunningInstance(socketPath, target);
+      if (forward == ForwardResult::Acknowledged) return 0;
+      if (forward == ForwardResult::NoServer
+          && AnubisOpenRequest::privateSocketPath() == socketPath) {
+        QLocalServer::removeServer(socketPath);
+        serverListening = server.listen(socketPath);
+      }
+      if (!serverListening) {
+        instanceLock->unlock();
+        instanceLock.reset();
+      }
+    } else {
+      // The lock winner creates the server before loading QML. One bounded
+      // reconnect distinguishes that launch window from an unavailable peer.
+      forward = forwardToRunningInstance(socketPath, target);
+      if (forward == ForwardResult::Acknowledged) return 0;
+    }
+  }
+  if (!socketPath.isEmpty() && !serverListening)
     qWarning() << "anubis-desktop: single-instance socket unavailable;"
                << "a second launch will open its own window";
 
@@ -136,12 +190,33 @@ int main(int argc, char* argv[]) {
   QObject::connect(&server, &QLocalServer::newConnection, &app, [&server] {
     auto* socket = server.nextPendingConnection();
     if (!socket) return;
+    socket->setReadBufferSize(AnubisOpenRequest::MaxFrameBytes + 1);
+    socket->setProperty("anubisOpenRequest", QByteArray());
     QObject::connect(socket, &QLocalSocket::readyRead, socket, [socket] {
-      const QString path = QString::fromUtf8(socket->readAll()).trimmed();
+      QByteArray message = socket->property("anubisOpenRequest").toByteArray();
+      const QByteArray chunk = socket->readAll();
+      if (chunk.size() > AnubisOpenRequest::MaxFrameBytes - message.size()) {
+        qWarning() << "anubis-desktop: oversized local open request";
+        socket->abort();
+        return;
+      }
+      message += chunk;
+      socket->setProperty("anubisOpenRequest", message);
+      if (!message.endsWith('\n')) return;
+      QString path;
+      QString requestId;
+      if (!AnubisOpenRequest::decode(message, &path, &requestId)) {
+        qWarning() << "anubis-desktop: invalid local open request";
+        socket->disconnectFromServer();
+        return;
+      }
       if (auto* instance = App::instance()) {
         if (path.isEmpty()) emit instance->raiseRequested();
         else instance->requestOpenPath(path);
       }
+      socket->write(AnubisOpenRequest::encodeAck(requestId));
+      socket->flush();
+      socket->disconnectFromServer();
     });
     QObject::connect(socket, &QLocalSocket::disconnected, socket,
                      &QLocalSocket::deleteLater);

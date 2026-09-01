@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/anubis-crypto", "crates/anubis-cli"]
+members = [
+    "crates/anubis-crypto",
+    "crates/anubis-cli",
+    "crates/anubis-v4-core",
+]
 
 [workspace.package]
 version = "2.1.0"

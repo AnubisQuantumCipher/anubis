@@ -1677,7 +1677,21 @@ Rejection is always fail-closed and always happens before any key material is
 used. There is no partial compatibility, no fallback parsing, and no
 auto-upgrade path.
 
-### 15.5 Legacy recipients
+### 15.5 Reserved v4 candidate token
+
+`anubis-encryption.org/v4` is reserved for the additive approved-algorithm
+candidate. The current software recognizes that token as distinct from v3 but
+does not parse or write a v4 container. It MUST refuse with an explicit v4
+disabled result and MUST NOT retry the v3 parser, relabel the bytes, or emit v3
+when v4 was requested.
+
+The outer dispatcher consumes only a bounded canonical first line and replays
+every consumed byte to exactly one version owner. The v3 parser repeats its own
+version check as defense in depth. In the CLI, this decision precedes v3
+identity loading and plaintext staging. This section reserves a namespace and
+downgrade rule; it does not define the v4 suite or wire format.
+
+### 15.6 Legacy recipients
 
 The same collision affected keys, and here it is not fully averted, because a
 human-readable part cannot be renumbered without changing every recipient

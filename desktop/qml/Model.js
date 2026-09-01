@@ -271,6 +271,18 @@ function validFingerprint(fp) {
   return /^[0-9A-F]{4}(-[0-9A-F]{4}){4}$/.test(formatFingerprint(fp))
 }
 
+// Fingerprints typed as policy are stricter than fingerprints received from
+// the engine. Formatting may add canonical dashes, but unrelated prose is
+// never mined for hexadecimal characters and accidentally accepted as a pin.
+function fingerprintPolicyInput(fp) {
+  var raw = String(fp === undefined || fp === null ? "" : fp)
+    .replace(/^\s+|\s+$/g, "")
+  if (raw === "") return ""
+  if (!/^[0-9A-Fa-f\s-]+$/.test(raw)) return ""
+  var canonical = formatFingerprint(raw)
+  return validFingerprint(canonical) ? canonical : ""
+}
+
 // The handle shown wherever a key would otherwise be. Never falls back to the
 // raw key: a 2573-character string in a label slot is not a handle, and a
 // truncated one invites exactly the mistaken-identity error the fingerprint
@@ -363,6 +375,20 @@ function normalizePath(raw, home) {
   if (s === "~") return String(home || "")
   if (s.indexOf("~/") === 0) s = String(home || "") + s.substring(1)
   return s
+}
+
+// Paths delivered by a file dialog, the engine, IPC, or an audit record are
+// already structured values. Their whitespace, quotes, and newlines are file
+// name bytes rather than presentation syntax and must survive unchanged.
+function exactPath(value) {
+  return value === undefined || value === null ? "" : String(value)
+}
+
+// Actions use this synchronously so a debounce can never leave the visible
+// field naming one file while the operation still receives the prior path.
+function pathForAction(committedPath, fieldText, editPending, home) {
+  return editPending === true ? normalizePath(fieldText, home)
+                              : exactPath(committedPath)
 }
 
 function isVaultFile(path) { return /\.anubis$/.test(String(path || "")) }
@@ -784,6 +810,60 @@ function signatureAttestationMatches(inspect, attested) {
   return current !== "" && validFingerprint(current) && checked === current
 }
 
+// Construct the complete decrypt boundary from a current inspection. Every
+// decrypt is pinned to immutable bytes, even when unsigned files remain
+// allowed for compatibility. Requiring a signature is an independent policy;
+// an explicit signer pin and a prior successful verification both imply it.
+function decryptPolicy(path, inspectedPath, inspect, attested,
+                       requireSignature, signerInput) {
+  var target = exactPath(path)
+  if (target === "" || target !== exactPath(inspectedPath) || !inspect)
+    return { ok: false,
+             error: "Inspect the current container before decrypting it." }
+
+  var id = contentId(inspect)
+  if (id === "")
+    return { ok: false,
+             error: "This engine did not provide a valid content_id; "
+               + "decrypt cannot be pinned to immutable bytes." }
+
+  var rawPin = String(signerInput === undefined || signerInput === null
+                      ? "" : signerInput).replace(/^\s+|\s+$/g, "")
+  var explicitSigner = fingerprintPolicyInput(rawPin)
+  if (rawPin !== "" && explicitSigner === "")
+    return { ok: false,
+             error: "Expected signer must be a complete signing fingerprint." }
+
+  var verifiedSigner = ""
+  if (attested && attested.ok === true
+      && signatureAttestationMatches(inspect, attested))
+    verifiedSigner = formatFingerprint(attested.fingerprint)
+
+  var signer = explicitSigner !== "" ? explicitSigner : verifiedSigner
+  return {
+    ok: true,
+    content_id: id,
+    require_signature: requireSignature === true || signer !== "",
+    signer: signer,
+    error: ""
+  }
+}
+
+function decryptPolicyArguments(policy) {
+  if (!policy || policy.ok !== true || contentId(policy) === "") return []
+  var args = ["--expect-content-id", policy.content_id]
+  if (policy.require_signature === true) args.push("--require-signature")
+  if (validFingerprint(policy.signer))
+    args.push("--signer", formatFingerprint(policy.signer))
+  return args
+}
+
+function decryptPolicyStillCurrent(policy, expectedContentId) {
+  var expected = contentId({ content_id: String(expectedContentId || "") })
+  return expected !== "" && !!policy && policy.ok === true
+    && contentId(policy) === expected
+}
+
 // ------------------------------------------------------------- inspector
 
 function stanzaRows(inspect) {
@@ -862,10 +942,10 @@ function signerFingerprint(inspect) {
   return inspect ? formatFingerprint(inspect.signer_fingerprint) : ""
 }
 
-// Real attribution: does a signer fingerprint belong to an identity in this
-// vault? Compared only against `signing_fingerprint`, so a hit is a true
-// statement and a miss is an equally true "not this vault", not the always-on
-// false alarm that comparing across namespaces would produce.
+// Cross-reference the header's claimed signer against an identity in this
+// vault. Compared only against `signing_fingerprint`; this identifies which
+// local key the header names but deliberately says nothing about whether the
+// signature is valid.
 function signedByIdentity(status, inspect) {
   var fp = signerFingerprint(inspect)
   if (fp === "") return null
@@ -874,6 +954,40 @@ function signedByIdentity(status, inspect) {
     if (formatFingerprint(list[i].signing_fingerprint) === fp)
       return { name: String(list[i].name), fingerprint: fp }
   return null
+}
+
+// A header fingerprint can identify a local key without proving that key made
+// the file. Authorship wording is therefore promoted only by a successful,
+// content-and-signer-bound signature attestation.
+function signerAttribution(status, inspect, attested) {
+  var signer = signedByIdentity(status, inspect)
+  var signerFp = signerFingerprint(inspect)
+  var verified = !!signer && attested && attested.ok === true
+    && signatureAttestationMatches(inspect, attested)
+  if (signer) {
+    return {
+      known: true,
+      verified: verified,
+      text: verified
+        ? "signed by your identity \"" + signer.name + "\""
+        : "header claims a signing key matching your identity \""
+          + signer.name + "\""
+    }
+  }
+  if (signerFp !== "") {
+    var checked = attested && attested.ok === true
+      && signatureAttestationMatches(inspect, attested)
+    return {
+      known: false,
+      verified: checked,
+      text: checked
+        ? "verified signer is not an identity in this vault -- check the "
+          + "fingerprint out of band before trusting it"
+        : "header claims a signer not in this vault -- check the fingerprint "
+          + "out of band before trusting it"
+    }
+  }
+  return { known: false, verified: false, text: "no signature to attribute" }
 }
 
 function signingFingerprint(identity) {

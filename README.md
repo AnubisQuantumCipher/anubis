@@ -57,7 +57,8 @@ cd anubis
 ```
 
 `install.sh` builds with cargo, installs `anubis` to `~/.local/bin`, creates
-`~/.config/anubis/identities` at mode 700 and `~/.local/state/anubis`, copies
+`~/.config/anubis`, its identity directory, and `~/.local/state/anubis` at mode
+700, copies
 the `khephri.anubis` plugin files into `~/.config/omarchy/plugins/`, and
 registers the bar widget after backing up `shell.json` (registration needs
 `jq`; without it the manual one-line edit is printed instead). It is
@@ -638,6 +639,12 @@ and plaintext-publication properties, but their scope and non-claims are part
 of the result. The complete ledger and additive approved-algorithm v4 plan are in
 [`docs/ASSURANCE.md`](docs/ASSURANCE.md).
 
+**V4 is a fail-closed foundation, not an encryption mode.** The exact outer
+dispatcher recognizes the reserved v4 token without routing it to v3, and the
+CLI refuses it before v3 identity access or plaintext staging. The isolated v4
+core intentionally has no production suite, parser, writer, crypto backend, or
+validation claim while its normative protocol decisions remain open.
+
 **The hybrid rationale.** An attacker must break both X25519 and ML-KEM-1024.
 Neither half is trusted alone: X25519 covers the possibility that the newer
 lattice construction or its recent pure-Rust implementations are flawed, and
@@ -744,13 +751,25 @@ cargo kani setup
 
 That local setup command downloads Kani's versioned runtime bundle. The CI
 evidence lane additionally fetches the explicit release asset and verifies its
-repository-pinned SHA-256 digest before setup.
+repository-pinned SHA-256 digest before setup. Its independent interoperability
+job runs both shipped verifiers against the stock OpenSSL ML-DSA provider on
+Arch and fails if that capability is absent; it does not turn a skipped Ubuntu
+cross-check into a green result.
+
+The setup runtime under `KANI_HOME` is a persistent toolchain installation, not
+a proof artifact; inspect its size and available filesystem space before
+installing or upgrading it. Once installed, `kani-bounded.sh` runs the version
+probe and proof in validated sessions with free-space, growth, RSS, output, and
+time guards. Its Cargo target and temporary files live in one disposable tree,
+which is removed on every handled exit. A stale lock blocks another run instead
+of allowing proof trees to pile up.
 
 Layout:
 
 ```
 crates/anubis-crypto/    library: format, primitives, key handling
 crates/anubis-cli/       binary `anubis`
+crates/anubis-v4-core/   inert v4 suite/provider boundary; no production crypto
 docs/FORMAT.md           wire format specification
 docs/ASSURANCE.md        NIST/FIPS claim ledger and formal-evidence boundary
 docs/VERIFYING.md        checking a signature without trusting this software
@@ -777,9 +796,9 @@ maps to an exact version. Keep dependencies current with `cargo update` and
 
 | Path | Contents |
 |---|---|
-| `~/.config/anubis/identities/` | Identity files, mode 600 in a 700 directory |
+| `~/.config/anubis/identities/` | Identity files, mode 600 in a private 700 config tree |
 | `~/.config/anubis/recipients.toml` | Labelled recipients |
-| `~/.local/state/anubis/audit.jsonl` | Append-only operation log |
+| `~/.local/state/anubis/audit.jsonl` | Mode-600 append-only operation log in a 700 directory; symlink/hard-link redirection is refused on Unix |
 | `~/.config/omarchy/plugins/khephri.anubis/` | Omarchy plugin |
 
 ---

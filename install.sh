@@ -3,7 +3,7 @@
 #
 #   * builds crates/anubis-cli with cargo (release)
 #   * installs the `anubis` binary into ~/.local/bin
-#   * creates ~/.config/anubis/identities (mode 700) and ~/.local/state/anubis
+#   * creates private config, identity, and state directories (mode 700)
 #   * adds { "id": "khephri.anubis" } to bar.layout.right in
 #     ~/.config/omarchy/shell.json, after writing a timestamped backup
 #
@@ -94,8 +94,8 @@ say "${CONFIG_DIR} (700)"
 say "${IDENTITY_DIR} (700)"
 
 mkdir -p "${STATE_DIR}"
-chmod 0755 "${STATE_DIR}"
-say "${STATE_DIR}"
+chmod 0700 "${STATE_DIR}"
+say "${STATE_DIR} (700)"
 
 # Tighten any pre-existing identity files that are more permissive than 600.
 # Never touches contents, only the mode.

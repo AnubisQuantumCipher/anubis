@@ -1,4 +1,4 @@
-//! ANUBIS v2 - hybrid post-quantum file encryption.
+//! ANUBIS/v3 hybrid post-quantum file encryption.
 //!
 //! Composes audited primitives; it does not implement any of them:
 //!
@@ -16,6 +16,7 @@
 
 pub mod armor;
 pub mod b32;
+pub mod container;
 pub mod error;
 pub mod format;
 pub mod hybrid;

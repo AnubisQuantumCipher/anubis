@@ -60,7 +60,8 @@ That document specifies behavior; it is not a certificate.
 The storage-guarded Kani lane model-checks production Rust functions against explicit
 harness assertions. `scripts/kani-bounded.sh` pins Kani, runs one solver job at
 a time, gives every harness a timeout, confines conventional temporary files to
-the disposable tree, monitors scratch growth, free space, and proof-process
+the disposable tree, supervises the version probe and proof in separate
+validated sessions, monitors scratch growth, free space, and aggregate process
 RSS, requires every inventoried `cover!` obligation to be reachable, and
 deletes intermediate models on every handled exit. A successful proof whose
 cleanup fails is a failed gate. CI installs the version-locked Kani proxy and
@@ -71,6 +72,7 @@ CBMC build products as durable evidence.
 | Property | Production boundary exercised | What success establishes | What it does not establish |
 | --- | --- | --- | --- |
 | Armor boundary transition matrix | `armor::advance_armor` | Every state/line-class pair follows the asserted finite accept/reject matrix; cover checks make representative security branches reachable. | UTF-8 trimming, base64 correctness, arbitrary-length allocation behavior, or the whole decoder. |
+| Exact outer-version policy | `container::version_line_policy` | Every modeled token-length/prefix/version-byte observation maps to one disjoint legacy, v3, v4-candidate, or unknown state; every state is reachable and there is no fallback state. | Correct derivation of those observations, whole-reader behavior, or correctness of a future v4 parser. |
 | Safe plaintext promotion | `format::plaintext_stage::promote` | A failed verdict cannot produce the authenticated type that owns `copy_to`; success can. | That the cryptographic verdict is correct, filesystem atomicity, or OS behavior. |
 | CLI output authorization | `anubis-cli::authorize_stage` | A failed caller-policy verdict cannot produce the policy-authorized type that owns file/stdout publication; success can. | That the policy verdict is correct, pathname safety, filesystem atomicity, or OS behavior. |
 | Payload span arithmetic | `format::payload_span` | Every accepted decomposition avoids underflow and reconstructs the original total. | Parser correctness or authenticity of the lengths. |
@@ -124,11 +126,26 @@ Formal intermediates are intentionally reproducible and disposable:
   system packages remain outside that content pin;
 - Kani target trees, GOTO binaries, SAT/SMT scratch, incremental objects, and
   ordinary Cargo proof build products are not uploaded or committed;
-- local runs hold an atomic exclusive lock directory, preflight free space, point `TMPDIR` into
-  the disposable tree, reject a symlinked proof-target parent, monitor the
-  proof tree's actual filesystem plus scratch and proof-process RSS thresholds,
-  terminate the complete solver process group on a breach, and clean the exact
-  validated work directory on every handled exit;
+- local runs hold an atomic exclusive lock directory, preflight free space
+  on the disposable, `KANI_HOME`, and `RUSTUP_HOME` filesystems before the
+  setup-capable version probe; the probe has bounded combined output, CPU,
+  wall time, aggregate RSS, disposable-tree growth, aggregate filesystem
+  growth, and a runtime free-space floor;
+- the proof points `TMPDIR` and Cargo's target into the disposable tree,
+  rejects a symlinked proof-target parent, monitors that tree's filesystem plus
+  scratch and aggregate proof-process RSS thresholds, terminates the complete
+  solver process group on a breach, and cleans the exact validated work
+  directory on every handled exit;
+- both Cargo phases enter distinct PID=PGID=SID sessions and cross a validation
+  barrier before work begins. A pre-opened FIFO watchdog is armed first; if the
+  outer monitor disappears, including through `SIGKILL`, EOF terminates and
+  then force-kills the otherwise orphaned phase process group;
+- fake-verifier lifecycle tests exercise exact version-before-proof ordering,
+  version mismatch and multiline rejection, probe timeout, probe/proof
+  measurement failures, non-isolated-session refusal, normal completion,
+  child failure, outer-supervisor `SIGKILL`, stale-lock refusal, no-orphan
+  behavior, cleanup, and low-space refusal without generating solver
+  intermediates;
 - CI runners are ephemeral and do not cache the formal target directory;
 - a release may retain a compact machine-readable proof manifest, but never an
   unbounded solver tree.
@@ -136,34 +153,43 @@ Formal intermediates are intentionally reproducible and disposable:
 This controls accumulation. The polling guards are defense in depth, not a
 kernel-enforced filesystem quota: one write can overshoot between polls, a tool
 can ignore `TMPDIR`, and unrelated processes can consume the same filesystem.
-An uncatchable process termination can leave the disposable directory and its
-stale lock behind; the next run refuses the lock until the operator inspects it,
-then cleans the exact validated work directory before starting.
+Killing the outer supervisor can leave the disposable directory and its stale
+lock, but the active phase watchdog stops the live writer and the next run
+refuses the lock instead of creating another tree. Killing the watchdog and its
+phase group itself with an uncatchable signal, a kernel failure, or power loss
+remains outside a shell runner's guarantee. The operator must inspect stale
+state before cleaning the exact validated work directory.
 The startup reserve and runtime free-space floor make ordinary exhaustion less
 likely, but they cannot prove the host will never fill. A deployment needing a
 hard aggregate limit must run the same disposable tree on an operator-created
 quota-controlled filesystem. An oversized proof must fail and be redesigned or
 run only after a deliberately reviewed resource-policy change.
 
+`cargo kani setup` is an explicit toolchain installation outside this runner;
+its persistent runtime is not proof scratch and is not deleted after a proof.
+Operators must provision and inspect that one-time installation separately.
+The guarded runner neither invokes that setup command nor accumulates another
+solver tree when a stale lock exists.
+
 ## Additive v4 target
 
 The v3 format is frozen for compatibility. Replacing algorithms in place would
 make old ciphertext ambiguous and would not create a coherent validation
-boundary. The recommended next format is an additive
-`anubis-encryption.org/v4` profile with a narrow cryptographic core:
+boundary. The implemented foundation now provides an exact, bounded one-time
+version dispatcher and an isolated `anubis-v4-core` crate. The CLI recognizes
+the reserved `anubis-encryption.org/v4` token and refuses it before loading v3
+identities or creating plaintext staging. A v4 write request cannot yield a v3
+permit. The isolated crate exports no production suite value, parser, writer,
+cryptographic operation, backend dependency, or provider-supplied validation
+status; its startup capability exists only for fake-provider boundary tests.
 
-- ML-KEM-1024 plus X25519 exposed only as one fixed, transcript-bound hybrid
-  service; no raw X25519 approved-service claim;
-- HKDF-SHA-512 owned by that fixed service;
-- AES-256-KWP for file-key wrapping;
-- chunked AES-256-GCM with deterministic, nonrepeating per-file invocation
-  fields and authenticated chunk position/finality;
-- HMAC-SHA-512 header authentication;
-- hedged pure ML-DSA-87 signatures;
-- an explicit approved-DRBG interface, self-test state, provider failure state,
-  key checks, and zeroization boundary;
-- exact one-time version dispatch with no parse, provider, or algorithm
-  fallback from v4 to v3.
+The still-non-normative algorithm target includes ML-KEM-1024, ML-DSA-87,
+AES-256-GCM payload protection, an approved AES key-wrap construction, and
+applicable approved hash/MAC/KDF/RBG functions. The classical contribution,
+approved combiner, KDF/key-wrap profiles, provider-owned IV generation, encoded
+nonce/AAD/transcript, and final-record rules remain specification gates. In
+particular, no counter-derived nonce rule or provider has been frozen by the
+foundation code.
 
 The current [FIPS 140-3 Implementation Guidance](https://csrc.nist.gov/csrc/media/Projects/cryptographic-module-validation-program/documents/fips%20140-3/FIPS%20140-3%20IG.pdf)
 permits a predefined ML-KEM hybrid to include a non-approved but allowed
@@ -176,10 +202,11 @@ boundary. Relevant construction sources include
 [SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final), and
 [SP 800-38F](https://csrc.nist.gov/pubs/sp/800/38/f/final).
 
-The v4 label will remain `approved-algorithm-candidate` unless and until an
-actual certificate says otherwise. A container cannot assert that it was
+The future v4 label will remain `approved-algorithm-candidate` unless and until
+an actual certificate says otherwise. A container cannot assert that it was
 created by a validated implementation; runtime status must report the active
 provider, approved-only state, validation boolean, and certificate identifier.
+Today there is no v4 runtime mode to report.
 
 ## Required v4 proof and test gates
 

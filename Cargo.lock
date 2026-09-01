@@ -80,6 +80,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "libc",
  "serde",
  "serde_json",
  "signal-hook",
@@ -92,6 +93,7 @@ dependencies = [
 name = "anubis-crypto"
 version = "2.1.0"
 dependencies = [
+ "anubis-v4-core",
  "base64",
  "bech32",
  "chacha20poly1305",
@@ -109,6 +111,10 @@ dependencies = [
  "x25519-dalek",
  "zeroize",
 ]
+
+[[package]]
+name = "anubis-v4-core"
+version = "2.1.0"
 
 [[package]]
 name = "anyhow"

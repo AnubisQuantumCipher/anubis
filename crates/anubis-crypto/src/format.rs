@@ -1,9 +1,9 @@
-//! The ANUBIS/v2 container: header, key wrapping, and top-level operations.
+//! The ANUBIS/v3 container: header, key wrapping, and top-level operations.
 //!
 //! Layout:
 //!
 //! ```text
-//! anubis-encryption.org/v2
+//! anubis-encryption.org/v3
 //! -> hybrid-x25519-mlkem1024 <b64 epk(32)> <b64 mlkem_ct(1568)>
 //! <b64 wrapped_file_key(48)>
 //! -> mldsa87 <b64 verifying_key(2592)>        (optional)
@@ -32,6 +32,7 @@ use std::io::{Seek, SeekFrom};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::container::{VersionLinePolicy, classify_version_line};
 use crate::error::{Error, Result};
 use crate::hybrid;
 use crate::keys::{Identity, MLDSA_VK_LEN, MLKEM_CT_LEN, Recipient, X25519_PUB_LEN};
@@ -42,11 +43,16 @@ use crate::stream;
 /// The number is 3, not 2, because anubis-rage 1.4.0 already shipped
 /// "anubis-encryption.org/v2" for its own, incompatible hybrid format.
 /// Two unparseable-by-each-other formats must not share a version string.
-pub const MAGIC: &str = "anubis-encryption.org/v3";
+pub const MAGIC: &str = crate::container::V3_MAGIC;
+/// Reserved version line for the additive approved-algorithm candidate.
+///
+/// No v4 parser or writer is enabled yet. Recognising the token separately is
+/// a downgrade boundary: future-v4 bytes must never be interpreted as v3.
+pub const CANDIDATE_V4_MAGIC: &str = crate::container::V4_MAGIC;
 /// anubis-rage 1.x, pure ML-KEM. Recognised only to refuse clearly.
-pub const LEGACY_V1: &str = "anubis-encryption.org/v1";
+pub const LEGACY_V1: &str = crate::container::LEGACY_V1_MAGIC;
 /// anubis-rage 1.4.0 hybrid. Recognised only to refuse clearly.
-pub const LEGACY_V2: &str = "anubis-encryption.org/v2";
+pub const LEGACY_V2: &str = crate::container::LEGACY_V2_MAGIC;
 /// Legacy hybrid stanza tag from anubis-rage 1.4.0.
 pub const LEGACY_STANZA_HYBRID: &str = "hybrid";
 /// Recipient stanza tag.
@@ -131,7 +137,7 @@ pub struct Stanza {
 
 /// Longest permitted header line. Bounds memory against a crafted file
 /// with no newlines, which `read_line` would otherwise slurp entirely.
-pub const MAX_HEADER_LINE: usize = 8192;
+pub const MAX_HEADER_LINE: usize = crate::container::MAX_VERSION_LINE;
 /// Most recipient stanzas accepted. Also bounds decapsulation work, which
 /// is the expensive half of parsing a hostile header.
 pub const MAX_STANZAS: usize = 1024;
@@ -256,22 +262,34 @@ impl Header {
 
         read_line(reader, &mut line, &mut raw)?;
         let first = line.trim_end();
-        if first != MAGIC {
-            return Err(match first {
-                LEGACY_V1 => Error::Unsupported(
+        match classify_version_line(first.as_bytes()) {
+            VersionLinePolicy::CurrentV3 => {}
+            VersionLinePolicy::LegacyV1 => {
+                return Err(Error::Unsupported(
                     "ANUBIS/v1 file (anubis-rage 1.x, pure ML-KEM). \
                      Not supported; see MIGRATION.md"
                         .into(),
-                ),
-                LEGACY_V2 => Error::Unsupported(
+                ));
+            }
+            VersionLinePolicy::LegacyV2 => {
+                return Err(Error::Unsupported(
                     "ANUBIS/v2 file (anubis-rage 1.4.0, hybrid). \
                      Not supported; see MIGRATION.md"
                         .into(),
-                ),
-                other => Error::Header(format!(
-                    "not an ANUBIS file: expected '{MAGIC}', found '{other}'"
-                )),
-            });
+                ));
+            }
+            VersionLinePolicy::CandidateV4 => {
+                return Err(Error::Unsupported(
+                    "ANUBIS/v4 candidate file. This build has no enabled v4 reader; \
+                     refusing to reinterpret it as ANUBIS/v3"
+                        .into(),
+                ));
+            }
+            VersionLinePolicy::Unknown => {
+                return Err(Error::Header(format!(
+                    "not an ANUBIS file: expected {MAGIC:?}, found {first:?}"
+                )));
+            }
         }
 
         let mut stanzas = Vec::new();
@@ -300,7 +318,7 @@ impl Header {
             }
 
             let Some(rest) = trimmed.strip_prefix("-> ") else {
-                return Err(Error::Header(format!("unexpected line: '{trimmed}'")));
+                return Err(Error::Header(format!("unexpected line: {trimmed:?}")));
             };
             let parts: Vec<&str> = rest.split(' ').collect();
 
@@ -394,7 +412,7 @@ impl Header {
                 }
                 other => {
                     return Err(Error::Unsupported(format!(
-                        "unknown stanza type '{}'",
+                        "unknown stanza type {:?}",
                         other.unwrap_or("")
                     )));
                 }
@@ -1055,6 +1073,9 @@ struct DelayReader<R: Read> {
     inner: R,
     /// Backing buffer; live bytes are `window[head..]`.
     window: Vec<u8>,
+    /// Reused input block. Keeping this allocation live avoids zero-filling a
+    /// fresh large extension every time a throttled reader returns one byte.
+    refill: Vec<u8>,
     head: usize,
     tail: usize,
     eof: bool,
@@ -1070,6 +1091,7 @@ impl<R: Read> DelayReader<R> {
         Self {
             inner,
             window: Vec::with_capacity(tail + REFILL),
+            refill: vec![0; REFILL],
             head: 0,
             tail,
             eof: false,
@@ -1118,12 +1140,11 @@ impl<R: Read> Read for DelayReader<R> {
         // pay a full window resize and compaction per call, which is
         // quadratic; a throttled pipe crawled.
         while !self.eof && self.live() < want {
-            let before = self.window.len();
-            self.window.resize(before + REFILL, 0);
-            let n = self.inner.read(&mut self.window[before..])?;
-            self.window.truncate(before + n);
+            let n = self.inner.read(&mut self.refill)?;
             if n == 0 {
                 self.eof = true;
+            } else {
+                self.window.extend_from_slice(&self.refill[..n]);
             }
         }
         let releasable = self.live().saturating_sub(self.tail);

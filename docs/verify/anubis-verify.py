@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -55,6 +56,10 @@ TAG_MAC = b"---"                                     # sec 4.1
 MAX_HEADER_LINE = 8192                               # sec 1
 MAX_STANZAS = 1024                                   # sec 4.3
 MAX_ARMOR_BYTES = 16777216                           # sec 9.2
+# Exact largest v3 header from sec 4.2: version, every permitted recipient
+# block, one optional signature stanza, and the final MAC line.
+MAX_HEADER_BYTES = 25 + MAX_STANZAS * (2163 + 65) + 3468 + 91
+HASH_BLOCK_BYTES = 1024 * 1024
 
 LEN_X25519_EPK = 32                                  # sec 2
 LEN_MLKEM_CT = 1568                                  # sec 2
@@ -89,6 +94,17 @@ class VerifierUnavailable(Exception):
     """
 
 
+def terminal_safe(text: str) -> str:
+    """Render user-controlled text without emitting terminal controls."""
+    rendered: list[str] = []
+    for character in text:
+        if character.isprintable() and character not in ("\u2028", "\u2029"):
+            rendered.append(character)
+        else:
+            rendered.append(character.encode("unicode_escape").decode("ascii"))
+    return "".join(rendered)
+
+
 # ---------------------------------------------------------------- base64, sec 1
 def b64_decode_exact(s: bytes, want_len: int, what: str) -> bytes:
     """Standard Base64, RFC 4648 sec 4, with ALL '=' padding removed (sec 1).
@@ -117,7 +133,7 @@ def b64_decode_exact(s: bytes, want_len: int, what: str) -> bytes:
             )
     try:
         raw = base64.b64decode(s + b"=" * (-n % 4), validate=True)
-    except Exception as exc:  # pragma: no cover - alphabet already screened
+    except (binascii.Error, ValueError) as exc:  # pragma: no cover - screened
         raise Malformed(f"{what}: base64 decode failed: {exc}") from exc
     if len(raw) != want_len:
         raise Malformed(
@@ -164,18 +180,63 @@ def dearmor_if_needed(data: bytes) -> tuple[bytes, bool]:
             f"armored input is {len(data)} bytes, over MAX_ARMOR_BYTES "
             f"{MAX_ARMOR_BYTES} (sec 9.2)"
         )
-    lines = data.split(b"\n")
-    if lines and lines[-1] == b"":
-        lines.pop()
-    if len(lines) < 3 or lines[0] != ARMOR_BEGIN or lines[-1] != ARMOR_END:
+    # Do not use bytes.splitlines()/split here. An accepted-size input may
+    # contain millions of tiny lines; materialising one Python object per line
+    # turns the byte cap into an unauthenticated memory-amplification path.
+    # Scan by offset and retain only the bounded body plus one line at a time.
+    first_lf = data.find(b"\n")
+    if first_lf < 0 or data[:first_lf] != ARMOR_BEGIN:
         raise Malformed("armor boundary lines are malformed (sec 9.2)")
-    body = b"".join(lines[1:-1])
-    for ln in lines[1:-1]:
-        if len(ln) > 64:
+
+    body = bytearray()
+    previous_body_line: bytes | None = None
+    position = first_lf + 1
+    saw_end = False
+    while position <= len(data):
+        lf = data.find(b"\n", position)
+        line_end = len(data) if lf < 0 else lf
+        if line_end - position > 64:
+            # The end boundary is shorter than the body-line cap, so no valid
+            # line is lost by refusing before slicing an attacker-sized span.
             raise Malformed("armor body is not wrapped at 64 columns (sec 9.2)")
+        if lf < 0:
+            line = data[position:line_end]
+            next_position = len(data) + 1
+        else:
+            line = data[position:line_end]
+            next_position = lf + 1
+
+        if line == ARMOR_END:
+            # Match the former parser's exact trailer policy: the end boundary
+            # may be the final bytes or carry one final LF, with nothing after.
+            if lf >= 0 and next_position != len(data):
+                raise Malformed("armor boundary lines are malformed (sec 9.2)")
+            if previous_body_line is None:
+                raise Malformed("armor body is missing (sec 9.2)")
+            if not 1 <= len(previous_body_line) <= 64:
+                raise Malformed("armor body is not wrapped at 64 columns (sec 9.2)")
+            body.extend(previous_body_line)
+            saw_end = True
+            break
+
+        if previous_body_line is not None:
+            # "wrapped at 64 columns" means every non-final data line is
+            # exactly 64 characters. Reject short-line floods immediately.
+            if len(previous_body_line) != 64:
+                raise Malformed("armor body is not wrapped at 64 columns (sec 9.2)")
+            body.extend(previous_body_line)
+        previous_body_line = line
+
+        if lf < 0:
+            break
+        position = next_position
+
+    if not saw_end:
+        raise Malformed("armor boundary lines are malformed (sec 9.2)")
     try:
-        return base64.b64decode(body, validate=True), True
-    except Exception as exc:
+        decoded = base64.b64decode(body, validate=True)
+        return decoded, True
+    except (binascii.Error, ValueError) as exc:
         raise Malformed(f"armor base64 decode failed: {exc}") from exc
 
 
@@ -460,12 +521,34 @@ def openssl_mldsa87_verify(
 
 
 # ---------------------------------------------------------------- top level
-def analyse(path: str, openssl: str = "openssl", expect_signer: str | None = None) -> dict:
-    raw = open(path, "rb").read()
-    data, armored = dearmor_if_needed(raw)
+def _read_exact_region(source, offset: int, length: int) -> bytes:
+    source.seek(offset)
+    data = source.read(length)
+    if len(data) != length:
+        raise Malformed("container changed or ended while it was being verified")
+    return data
 
-    h = parse_header(data)
-    file_size = len(data)
+
+def _hash_prefix(read_region, end: int) -> bytes:
+    digest = hashlib.sha512()
+    offset = 0
+    while offset < end:
+        length = min(HASH_BLOCK_BYTES, end - offset)
+        digest.update(read_region(offset, length))
+        offset += length
+    return digest.digest()
+
+
+def _analyse_decoded(
+    path: str,
+    header_data: bytes,
+    file_size: int,
+    armored: bool,
+    read_region,
+    openssl: str,
+    expect_signer: str | None,
+) -> dict:
+    h = parse_header(header_data)
     header_len = h.header_len
     signed = h.verifying_key is not None
     sig_len = LEN_MLDSA_SIG if signed else 0            # sec 3
@@ -527,10 +610,11 @@ def analyse(path: str, openssl: str = "openssl", expect_signer: str | None = Non
     res["signer_fingerprint"] = fp_render(fp)
     res["signer_fingerprint_hex"] = fp.hex()
 
-    signature = data[file_size - LEN_MLDSA_SIG:]
-    header_bytes = data[:header_len]                     # INCLUDING the MAC line
-    payload_ct = data[header_len:file_size - LEN_MLDSA_SIG]
-    S = hashlib.sha512(header_bytes + payload_ct).digest()   # sec 10.2
+    signature = read_region(file_size - LEN_MLDSA_SIG, LEN_MLDSA_SIG)
+    # S covers exactly the decoded bytes preceding the fixed signature trailer.
+    # Read in bounded blocks so a valid binary container never needs a second
+    # attacker-sized in-memory or on-disk copy.
+    S = _hash_prefix(read_region, file_size - LEN_MLDSA_SIG)  # sec 10.2
     res["digest_S"] = S.hex()
 
     ok, detail = openssl_mldsa87_verify(vk, S, signature, SIG_CONTEXT, openssl)
@@ -556,10 +640,89 @@ def analyse(path: str, openssl: str = "openssl", expect_signer: str | None = Non
     return res
 
 
+def analyse(path: str, openssl: str = "openssl", expect_signer: str | None = None) -> dict:
+    with open(path, "rb") as source:
+        before = os.fstat(source.fileno())
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+
+        def ensure_source_unchanged(kind: str) -> None:
+            after = os.fstat(source.fileno())
+            after_identity = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            if after_identity != before_identity:
+                raise Malformed(f"{kind} container changed while it was being verified")
+
+        prefix = source.read(len(ARMOR_BEGIN))
+        source.seek(0)
+
+        if prefix.startswith(ARMOR_BEGIN):
+            if before.st_size > MAX_ARMOR_BYTES:
+                raise Malformed(
+                    f"armored input is {before.st_size} bytes, over MAX_ARMOR_BYTES "
+                    f"{MAX_ARMOR_BYTES} (sec 9.2)"
+                )
+            raw = source.read(MAX_ARMOR_BYTES + 1)
+            if len(raw) > MAX_ARMOR_BYTES:
+                raise Malformed(
+                    f"armored input exceeds MAX_ARMOR_BYTES {MAX_ARMOR_BYTES} (sec 9.2)"
+                )
+            data, armored = dearmor_if_needed(raw)
+            del raw
+
+            def read_region(offset: int, length: int) -> bytes:
+                end = offset + length
+                region = data[offset:end]
+                if len(region) != length:
+                    raise Malformed("decoded armor ended while it was being verified")
+                return region
+
+            result = _analyse_decoded(
+                path,
+                data[:MAX_HEADER_BYTES + 1],
+                len(data),
+                armored,
+                read_region,
+                openssl,
+                expect_signer,
+            )
+            ensure_source_unchanged("armored")
+            return result
+
+        # Binary input remains on the same open handle. Only the maximally
+        # sized header prefix is materialized; payload hashing is streaming.
+        header_data = source.read(MAX_HEADER_BYTES + 1)
+
+        def read_region(offset: int, length: int) -> bytes:
+            return _read_exact_region(source, offset, length)
+
+        result = _analyse_decoded(
+            path,
+            header_data,
+            before.st_size,
+            False,
+            read_region,
+            openssl,
+            expect_signer,
+        )
+        ensure_source_unchanged("binary")
+        return result
+
+
 def render_text(r: dict, verbose: bool) -> str:
     L = []
     A = L.append
-    A(f"file                {r['path']}")
+    A(f"file                {terminal_safe(r['path'])}")
     A(f"format              {r['format']}" + ("  (ASCII-armored)" if r["armored"] else ""))
     A(f"file size           {r['file_size']} bytes")
     A(f"recipients          {r['recipients']}")
@@ -585,7 +748,8 @@ def render_text(r: dict, verbose: bool) -> str:
             A("           compare this fingerprint against a value confirmed out of band.")
     elif r["result"] == "FAIL":
         A("SIGNATURE: FAIL -- the signature does not verify over this file")
-        A(f"           {r['detail'].splitlines()[-1] if r['detail'] else ''}")
+        detail = r["detail"].splitlines()[-1] if r["detail"] else ""
+        A(f"           {terminal_safe(detail)}")
     elif r["result"] == "ABSENT":
         A("SIGNATURE: ABSENT -- this container carries no -> mldsa87 stanza")
         A("           Absence of a signature is NOT evidence the sender did not")
@@ -641,6 +805,21 @@ def selftest(openssl: str) -> int:
     except Malformed:
         print("  [PASS] non-canonical trailing bits: rejected")
 
+    print("sec 9.2 -- canonical armor wrapping:")
+    canonical_armor = ARMOR_BEGIN + b"\nQUJD\n" + ARMOR_END + b"\n"
+    check("single final data line", dearmor_if_needed(canonical_armor), (b"ABC", True))
+    short_nonfinal = ARMOR_BEGIN + b"\nA\nAAA\n" + ARMOR_END + b"\n"
+    try:
+        dearmor_if_needed(short_nonfinal)
+        print("  [FAIL] short non-final data line: accepted")
+        fails += 1
+    except Malformed:
+        print("  [PASS] short non-final data line: rejected")
+
+    print("terminal diagnostics:")
+    check("control rendering", terminal_safe("path\x1b[2J\nnext"),
+          "path\\x1b[2J\\nnext")
+
     print(f"\n{'ALL PASS' if fails == 0 else str(fails) + ' FAILURE(S)'}")
     return 0 if fails == 0 else 1
 
@@ -679,13 +858,20 @@ def main(argv: list[str]) -> int:
         if a.json:
             print(json.dumps({"result": "MALFORMED", "error": str(exc)}))
         else:
-            print(f"MALFORMED: {exc}", file=sys.stderr)
+            print(f"MALFORMED: {terminal_safe(str(exc))}", file=sys.stderr)
         return 3
     except VerifierUnavailable as exc:
-        print(f"ENVIRONMENT: {exc}", file=sys.stderr)
+        print(f"ENVIRONMENT: {terminal_safe(str(exc))}", file=sys.stderr)
+        return 4
+    except MemoryError:
+        print("ENVIRONMENT: verifier memory limit exhausted", file=sys.stderr)
         return 4
     except OSError as exc:
-        print(f"ENVIRONMENT: cannot read {a.file}: {exc}", file=sys.stderr)
+        print(
+            f"ENVIRONMENT: cannot read {terminal_safe(a.file)}: "
+            f"{terminal_safe(str(exc))}",
+            file=sys.stderr,
+        )
         return 4
 
     if a.json:
