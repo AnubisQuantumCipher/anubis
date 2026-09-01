@@ -58,10 +58,10 @@ Item {
   readonly property bool engineMissing: engineProbed && enginePath === ""
   readonly property string installHint: Model.installHint()
 
-  // The child pipeline is capped by `head` one byte past this limit, so an
-  // oversized record is detectable without buffering arbitrary output in the
-  // long-lived shell process. `pipefail` also rejects a truncated multibyte
-  // record even when JavaScript's character count is smaller than its bytes.
+  // Both child streams are captured through `head` one byte past this limit.
+  // The shell then uses `wc -c` on those bounded files before releasing any
+  // bytes to the long-lived shell process, so the boundary remains a raw-byte
+  // boundary even for multibyte UTF-8.
   readonly property int maxStatusOutputBytes: 4194304
 
   // ---- status --------------------------------------------------------------
@@ -104,19 +104,38 @@ Item {
     statusProc.outText = ""
     statusProc.errText = ""
     statusProc.command = [
-      "/usr/bin/timeout", "--signal=TERM", "15s",
-      "/usr/bin/bash", "-o", "pipefail", "-c",
-      "\"$1\" status --json | /usr/bin/head -c 4194305",
+      "/usr/bin/bash", "-c",
+      "set -u; limit=4194304; "
+        + "work=$(/usr/bin/mktemp -d /tmp/anubis-status.XXXXXX) || exit 126; "
+        + "cleanup() { /usr/bin/unlink \"$work/out\" 2>/dev/null || :; "
+        + "/usr/bin/unlink \"$work/err\" 2>/dev/null || :; "
+        + "/usr/bin/rmdir -- \"$work\" 2>/dev/null || :; }; "
+        + "trap cleanup EXIT; set +e; "
+        + "/usr/bin/timeout --signal=TERM --kill-after=2s 15s "
+        + "\"$1\" status --json "
+        + "> >(/usr/bin/head -c 4194305 > \"$work/out\") "
+        + "2> >(/usr/bin/head -c 4194305 > \"$work/err\"); "
+        + "rc=$?; wait; "
+        + "out_bytes=$(/usr/bin/wc -c < \"$work/out\"); "
+        + "err_bytes=$(/usr/bin/wc -c < \"$work/err\"); "
+        + "if [ \"$out_bytes\" -gt \"$limit\" ] "
+        + "|| [ \"$err_bytes\" -gt \"$limit\" ]; then exit 125; fi; "
+        + "/usr/bin/cat -- \"$work/out\"; "
+        + "/usr/bin/cat -- \"$work/err\" >&2; exit \"$rc\"",
       "anubis-status", enginePath
     ]
     statusProc.running = true
   }
 
   function applyStatus(raw, stderrText, exitCode) {
+    var rawStderr = String(stderrText || "")
+    var displayStderr = rawStderr.replace(/^\s+|\s+$/g, "")
     var parsed = null
     var parsedCount = 0
     var protocolValid = true
-    if (String(raw || "").length > maxStatusOutputBytes) {
+    if (exitCode === 125
+        || String(raw || "").length > maxStatusOutputBytes
+        || rawStderr.length > maxStatusOutputBytes) {
       status = null
       statusError = "status output exceeded the safe readout limit"
       statusAtMs = Date.now()
@@ -134,10 +153,12 @@ Item {
         } else protocolValid = false
       }
     }
-    if (exitCode !== 0 || !protocolValid || parsed === null
-        || parsedCount !== 1) {
+    if (!Model.statusResponseAccepted(parsed, exitCode, rawStderr,
+                                       protocolValid, parsedCount)) {
       status = null
-      statusError = stderrText !== "" ? stderrText
+      statusError = rawStderr !== ""
+        ? (displayStderr !== "" ? displayStderr
+                                : "anubis status wrote to stderr")
         : (exitCode === 127 ? "anubis could not execute"
             : (exitCode === 124 ? "anubis status timed out"
               : (exitCode !== 0 ? "anubis status exited " + exitCode
@@ -180,9 +201,10 @@ Item {
     // filename alone means the bar would silently drive the wrong tool and
     // report a dead vault with no cause. `--help` parses arguments and nothing
     // else: it reads no key and writes no file.
-    command: ["/usr/bin/timeout", "--signal=TERM", "15s",
+    command: ["/usr/bin/timeout", "--signal=TERM", "--kill-after=2s", "15s",
       "/usr/bin/env", "sh", "-c",
-      "is_engine() { \"$1\" --help 2>/dev/null | "
+      "is_engine() { /usr/bin/timeout --signal=TERM --kill-after=2s 15s "
+      + "\"$1\" --help 2>/dev/null | "
       + "grep -qi 'post-quantum file encryption'; }; "
       + "for p in \"$HOME/.cargo/bin/anubis\" \"$HOME/.local/bin/anubis\" "
       + "/usr/local/bin/anubis /usr/bin/anubis; do "
@@ -217,7 +239,7 @@ Item {
 
     function settle() {
       if (!exited || !outDone || !errDone) return
-      root.applyStatus(outText, errText.replace(/^\s+|\s+$/g, ""), exitCode)
+      root.applyStatus(outText, errText, exitCode)
     }
 
     stdout: StdioCollector {

@@ -15,18 +15,18 @@ TestCase {
     return {
       kind: "status",
       status_schema: "anubis-status/assurance-v1",
-      version: "test",
+      version: "2.1.0",
       generated: "now",
       identities: [],
       recipients: [],
       recent: [],
       counts: { encrypt: 0, decrypt: 0, failed: 0 },
       suite: {
-        kem: "kem",
-        sig: "sig",
-        aead: "aead",
-        kdf: "kdf",
-        format: "format",
+        kem: "X25519+ML-KEM-1024",
+        sig: "ML-DSA-87",
+        aead: "ChaCha20-Poly1305",
+        kdf: "HKDF-SHA512",
+        format: "anubis-encryption.org/v3",
         pure_rust: true,
         fips: ["203", "204"],
         nist_standards: ["FIPS 203", "FIPS 204"],
@@ -63,6 +63,62 @@ TestCase {
     validated.suite.fips_140_3_validated = true
     validated.suite.fips_140_3_certificate = "unverified"
     verify(!Model.validStatusRecord(validated))
+
+    var falseStandard = completeStatus()
+    falseStandard.suite.nist_standards = ["FIPS 999"]
+    verify(!Model.validStatusRecord(falseStandard))
+
+    var reorderedStandards = completeStatus()
+    reorderedStandards.suite.nist_standards = ["FIPS 204", "FIPS 203"]
+    verify(!Model.validStatusRecord(reorderedStandards))
+
+    var wrongCategory = completeStatus()
+    wrongCategory.suite.pq_security_category = 6
+    verify(!Model.validStatusRecord(wrongCategory))
+
+    var wrongAlgorithm = completeStatus()
+    wrongAlgorithm.suite.kem = "replacement-kem"
+    verify(!Model.validStatusRecord(wrongAlgorithm))
+
+    var extraClaim = completeStatus()
+    extraClaim.suite.unexpected_claim = true
+    verify(!Model.validStatusRecord(extraClaim))
+    compare(Model.fipsChips(extraClaim.suite).join("|"),
+            "FIPS 140-3 STATUS REFUSED")
+
+    var claimVersion = completeStatus()
+    claimVersion.version = "not-a-semver"
+    verify(!Model.validStatusRecord(claimVersion))
+
+    var claimTokenVersion = completeStatus()
+    claimTokenVersion.version = "2.1.0-"
+      + ["FIPS", "140-3", "VALIDATED"].join("-")
+    verify(!Model.validStatusRecord(claimTokenVersion))
+
+    var extraRootClaim = completeStatus()
+    extraRootClaim.unexpected_claim = true
+    verify(!Model.validStatusRecord(extraRootClaim))
+  }
+
+  function test_statusParserRejectsDuplicateDecodedMemberNames() {
+    var raw = JSON.stringify(completeStatus())
+    var claimName = ["fips", "140", "3", "validated"].join("_")
+    var expected = "\"" + claimName + "\":" + String(false)
+    var ambiguous = "\"" + claimName + "\":" + String(true)
+      + "," + expected
+    verify(Model.parseLine(raw.replace(expected, ambiguous)) === null)
+
+    var top = "\"kind\":\"status\""
+    var escapedDuplicate = "\"k\\u0069nd\":\"other\"," + top
+    verify(Model.parseLine(raw.replace(top, escapedDuplicate)) === null)
+    verify(Model.validStatusRecord(Model.parseLine(raw)))
+  }
+
+  function test_statusTransportRequiresCompletelyEmptyStderr() {
+    var status = completeStatus()
+    verify(Model.statusResponseAccepted(status, 0, "", true, 1))
+    verify(!Model.statusResponseAccepted(status, 0, "\n", true, 1))
+    verify(!Model.statusResponseAccepted(status, 0, " ", true, 1))
   }
 
   function test_currentStatusRendersExplicitNonValidation() {
@@ -76,7 +132,36 @@ TestCase {
     status.suite.fips_140_3_validated = true
     status.suite.fips_140_3_certificate = "unverified"
     compare(Model.fipsChips(status.suite).join("|"),
-            "NIST FIPS 203|NIST FIPS 204|PQ CATEGORY 5|FIPS 140-3 STATUS REFUSED")
+            "FIPS 140-3 STATUS REFUSED")
+  }
+
+  function test_assuranceLineRequiresAcceptedStatus() {
+    var absent = Model.assuranceLine(null)
+    verify(absent.indexOf("not stated") >= 0)
+    verify(absent.indexOf("ML-KEM-1024") < 0)
+
+    var current = Model.assuranceLine(completeStatus())
+    verify(current.indexOf("NIST PQ Category 5") >= 0)
+    verify(current.indexOf("not FIPS 140-3 validated") >= 0)
+
+    var legacy = completeStatus()
+    delete legacy.status_schema
+    delete legacy.suite.nist_standards
+    delete legacy.suite.pq_security_category
+    delete legacy.suite.algorithm_profile
+    delete legacy.suite.approved_only_mode
+    delete legacy.suite.fips_140_3_validated
+    delete legacy.suite.fips_140_3_certificate
+    var legacyLine = Model.assuranceLine(legacy)
+    verify(legacyLine.indexOf("Legacy engine suite") >= 0)
+    verify(legacyLine.indexOf("status are not stated") >= 0)
+  }
+
+  function test_transientLabelsReserveStableWidth() {
+    var resting = Model.stableTextWidth(24, 48)
+    var busy = Model.stableTextWidth(48, 48)
+    compare(resting, busy)
+    compare(resting, 48)
   }
 
   function test_legacyStatusRemainsUsableButAssuranceIsNotStated() {

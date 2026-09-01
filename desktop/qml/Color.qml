@@ -8,9 +8,10 @@ import Anubis
 // like the rest of the machine rather than inventing its own palette. A
 // `theme` block in the settings file overrides any of them.
 //
-// The narrowness is the point. `urgent` means AUTHENTICATION FAILED and is
-// never spent on anything else; `accent` means the engine verified something.
-// A palette with more colours in it would make both of those claims cheaper.
+// The narrowness is the point. `urgent` marks a failed or refused result.
+// `accent` is the surface's general emphasis colour: focus, primary actions,
+// operational readiness, and positive engine verdicts. Assurance comes from
+// the adjacent label and accepted engine record, never from colour alone.
 QtObject {
   id: root
 
