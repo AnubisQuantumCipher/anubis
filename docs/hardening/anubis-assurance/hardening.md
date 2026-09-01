@@ -37,9 +37,10 @@ tests, and formal proofs do not create that certificate.
 - Do not use “FIPS validated,” “CMVP validated,” or equivalent language unless
   a certificate covers the exact module, version, operational environment, and
   approved mode being described.
-- The operator does not plan to commission a third-party audit. Formal work
-  must therefore be especially explicit about scope and non-claims, while also
-  acknowledging that it cannot replace CMVP's independent laboratory process.
+- No independent-audit or external-validation sponsor is currently committed.
+  External sponsorship is welcome under `docs/cmvp/SPONSORSHIP.md`; until scoped
+  evidence exists, formal work must remain explicit about non-claims and cannot
+  replace CMVP's independent laboratory process.
 - Proof generation must be storage-bounded. Solver scratch, generated vectors,
   build trees, and expanded traces are disposable; retained evidence is compact,
   quota-enforced, and revision-bound.
@@ -51,7 +52,7 @@ tests, and formal proofs do not create that certificate.
 
 | Opportunity | Evidence | Options | Recommendation | Proposal |
 | --- | --- | --- | --- | --- |
-| Make cryptographic and formal-assurance claims versioned, machine-checkable, and non-overstated | Safe publication, content-bound attestations, hybrid contribution, zeroization, strict parser, and reader/writer invariant findings; FIPS 203, FIPS 204, FIPS 140-3, CAVP, and CMVP | **Option 1:** v3 evidence-only; **Option 2:** additive isolated v4 approved-algorithm candidate; **Option 3:** in-place replacement | Select Option 2 while retaining Option 1's claim-ledger discipline for v3 | [Truthful machine-verifiable assurance](proposals/truthful-machine-verifiable-assurance.md) |
+| Make cryptographic and formal-assurance claims versioned, machine-checkable, and non-overstated | Safe publication, content-bound attestations, hybrid contribution, zeroization, strict parser, and reader/writer invariant findings; FIPS 203, FIPS 204, FIPS 140-3, CAVP, and CMVP | **Option 1:** v3 evidence-only; **Option 2:** additive isolated v4 restricted-profile candidate; **Option 3:** in-place replacement | Select Option 2 while retaining Option 1's claim-ledger discipline for v3 | [Truthful machine-verifiable assurance](proposals/truthful-machine-verifiable-assurance.md) |
 
 ## Recommendation Summary
 
@@ -70,21 +71,21 @@ make the product CMVP validated. Option 3 has a real maintenance advantage—one
 engine and no long-lived compatibility branch—but its wire ambiguity, forced
 migration, and rollback risk are disproportionate for encrypted user data.
 
-The selected design is deliberately called an **approved-algorithm candidate**,
+The selected design is deliberately called a **restricted-profile candidate**,
 not an approved or validated module. Even a complete formal proof portfolio
-cannot issue CAVP or CMVP certificates. If the project permanently declines the
-external validation process, the truthful terminal claim is that the exact
-version uses specified NIST algorithms and has machine-checked stated
-properties—not that it is FIPS 140-3 validated.
+cannot issue CAVP or CMVP certificates. The owner will not purchase the external
+validation process, while outside sponsors may fund it separately. The current
+claim ceiling is that the exact version uses specified NIST algorithms and has
+machine-checked stated properties—not that it is FIPS 140-3 validated. Funding
+alone does not raise that ceiling.
 
 ## Next Decisions
 
 - Freeze the v4 threat model, algorithm suite, hybrid-combiner rules, and wire
   grammar before production implementation.
-- Decide whether the classical contribution in the candidate profile is an
-  approved classical key-establishment method or an explicitly non-approved
-  auxiliary contribution; resolve this against current CMVP guidance before
-  describing any approved mode.
+- Decide whether the candidate retains X25519 as an explicitly non-NIST
+  auxiliary contribution or selects an ML-KEM-only profile; freeze one choice
+  and never describe either as an approved mode.
 - Define the exact proof obligations and assumptions for parser totality,
   nonce uniqueness, transcript binding, fail-closed publication, downgrade
   resistance, and secret lifetime.

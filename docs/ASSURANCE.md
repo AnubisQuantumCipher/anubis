@@ -36,11 +36,16 @@ and [CAVP](https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Pro
 Implementing a standardized algorithm is not the same as using a validated
 module. Passing local vectors is not CAVP validation. Formal verification is
 not a substitute for the external process that the CMVP definition requires.
-The project is now pursuing that external path through the controlled
-[CMVP readiness package](cmvp/README.md). Until an accredited laboratory tests
-the exact module and CMVP issues a certificate, the strongest honest claim is
-an **approved-algorithm candidate with machine-checked stated properties**, not
-“FIPS validated.”
+The owner has chosen not to purchase external validation. External people or
+organizations may fund that separate work under the
+[sponsorship policy](cmvp/SPONSORSHIP.md). The controlled
+[v4 engineering self-assessment](cmvp/README.md) therefore records certification
+as sponsor-deferred and unstarted while the active work remains project-owned
+implementation and independent-test gates. Sponsorship does not create CAVP or
+CMVP evidence. The strongest honest description is a **non-validated
+restricted cryptographic profile using NIST-standardized algorithms and
+implementing selected software-module controls**, not “FIPS compliant,”
+“approved mode,” CAVP validated, or CMVP validated.
 
 ## v3 algorithm profile
 
@@ -183,23 +188,25 @@ the reserved `anubis-encryption.org/v4` token and refuses it before loading v3
 identities or creating plaintext staging. A v4 write request cannot yield a v3
 permit. The isolated crate exports no production suite value, parser, writer,
 cryptographic operation, backend dependency, or provider-supplied validation
-status. Its fake-provider tests now exercise pre-operational, self-testing,
-operational, latched error, on-demand test, and explicit zeroization-result
-transitions. No cryptographic service is exposed.
+status. Its fake-provider tests now exercise module-owned ordered self-test
+phases, operational and latched-error behavior, cleanup on failure, terminal
+zeroization, and a result-bound service gate. Only the module can construct a
+completed-service indicator, and that indicator is hard-coded as not CMVP
+validated. No production cryptographic service is exposed.
 
-The proposed lowest-risk first-certification target is ML-KEM-1024 Scenario 1,
-ML-DSA-87, AES-256-GCM payload protection, AES-256-KW file-key wrapping,
+The restricted-profile design baseline evaluates ML-KEM-1024, ML-DSA-87,
+AES-256-GCM payload protection, AES-256-KW file-key wrapping,
 HMAC_DRBG/SHA2-512, and the applicable SHA2/SHA3/SHAKE/HMAC prerequisites.
-Direct KEM-key use, key wrap, provider-owned IV generation, entropy/ESV route,
-encoded AAD/transcript, signature interface, final-record rules, integrity
-mechanism, and exact ACVP registrations remain CST-laboratory architecture
-gates. No provider or production suite has been frozen.
+Direct KEM-key use, hybrid selection, key wrap, provider-owned IV generation,
+entropy route, encoded AAD/transcript, signature interface, final-record rules,
+integrity mechanism, and exact local vector registrations remain project
+architecture-review gates. No provider or production suite has been frozen.
 
 The current [FIPS 140-3 Implementation Guidance](https://csrc.nist.gov/csrc/media/Projects/cryptographic-module-validation-program/documents/fips%20140-3/FIPS%20140-3%20IG.pdf)
 permits a predefined ML-KEM hybrid to include a non-approved but allowed
 classical component only under specific module-owned constraints. ML-KEM-only
-is a deliberate first-certificate scope reduction, not a FIPS requirement to
-remove X25519. If a later v4 design selects the classical hedge, the candidate
+is one scope-reduction option, not a FIPS requirement to remove X25519. If the
+v4 architecture decision selects the classical hedge, the candidate
 core must own the complete fixed hybrid service; an application that
 independently calls unrelated X25519, ML-KEM, and HKDF services is not the same
 boundary. The decision and test inventory are in
@@ -209,11 +216,12 @@ boundary. The decision and test inventory are in
 [SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final), and
 [SP 800-38F](https://csrc.nist.gov/pubs/sp/800/38/f/final).
 
-The future v4 label will remain `approved-algorithm-candidate` unless and until
-an actual certificate says otherwise. A container cannot assert that it was
-created by a validated implementation; runtime status must report the active
-provider, approved-only state, validation boolean, and certificate identifier.
-Today there is no v4 runtime mode to report.
+The future v4 label is `restricted-nist-standard-profile`. A container cannot
+assert that it was created by a validated implementation. Any future runtime
+status must report the active provider and restricted-profile result while
+keeping compliance, approved-mode, CAVP, CMVP, and certificate fields false or
+absent according to the reviewed schema. Today there is no v4 runtime mode to
+report.
 
 ## Required v4 proof and test gates
 
@@ -221,7 +229,7 @@ Before v4 can become the default writer, it must have:
 
 - frozen byte-exact v3 decrypt vectors and permanent v3 read compatibility;
 - deterministic test-provider v4 wire vectors and an independent verifier;
-- approved-algorithm known-answer and ACVP-compatible vector interfaces;
+- standard-algorithm known-answer and ACVP-compatible local vector interfaces;
 - cross-provider differential encryption, decryption, and signature checks;
 - adversarial downgrade, suite-confusion, reorder, duplicate, truncation,
   substitution, key-wrap corruption, signature corruption, counter exhaustion,

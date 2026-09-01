@@ -25,9 +25,10 @@ validated cryptographic module are not the same claim. FIPS 140-3 defines
 Security Levels 1 through 4; there is no Level 5. ANUBIS has no CMVP
 certificate and v3 has no approved-only mode. The normative claim taxonomy,
 formal harness inventory, non-claims, and additive v4 candidate architecture
-are maintained in [ASSURANCE.md](ASSURANCE.md). The active accredited-lab
-validation path, current gaps, candidate module boundary, and certificate claim
-gate are maintained in [cmvp/](cmvp/README.md).
+are maintained in [ASSURANCE.md](ASSURANCE.md). The non-certified v4
+engineering profile, current gaps, candidate module boundary, certificate claim
+gate, and deferred optional validation path are maintained in
+[cmvp/](cmvp/README.md).
 
 **ANUBIS composes audited and standardised primitives; it does not implement
 them.** All cryptographic operations are delegated to established Rust

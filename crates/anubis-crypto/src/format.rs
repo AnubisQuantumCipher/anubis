@@ -44,7 +44,7 @@ use crate::stream;
 /// "anubis-encryption.org/v2" for its own, incompatible hybrid format.
 /// Two unparseable-by-each-other formats must not share a version string.
 pub const MAGIC: &str = crate::container::V3_MAGIC;
-/// Reserved version line for the additive approved-algorithm candidate.
+/// Reserved version line for the additive restricted-profile candidate.
 ///
 /// No v4 parser or writer is enabled yet. Recognising the token separately is
 /// a downgrade boundary: future-v4 bytes must never be interpreted as v3.

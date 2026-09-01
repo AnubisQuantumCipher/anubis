@@ -184,7 +184,9 @@ mid-group split is the same silent half-truth as an elide.
 - The assurance fields use a versioned status schema. A pre-assurance engine
   remains usable during a non-atomic upgrade, but renders
   `FIPS 140-3 STATUS NOT STATED`; partial or unknown assurance schemas are
-  rejected.
+  rejected. An unexpected positive validation field renders
+  `FIPS 140-3 STATUS REFUSED`; positive display code is added only through a
+  future evidence-backed schema review.
 - Nothing here claims a behaviour it cannot perform.
 
 Operations are appended by the engine to `~/.local/state/anubis/audit.jsonl`

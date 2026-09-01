@@ -1,144 +1,153 @@
-# First-certification algorithm profile
+# Restricted v4 algorithm-profile decision record
 
-Status: proposed baseline for a CST-laboratory architecture checkpoint. No
-production v4 suite is frozen or enabled by this document.
+Status: design baseline awaiting project architecture decision and independent
+review. No production v4 suite is frozen or enabled. The listed standards and
+local vector plans are not CAVP validation, approved operation, FIPS 140-3
+compliance, or CMVP validation.
 
-## Decision
+## Decision principles
 
-The lowest-risk initial certificate target is IG D.S Scenario 1 with
-ML-KEM-1024 only. ANUBIS/v3 retains its fixed X25519 plus ML-KEM construction
-outside the candidate FIPS boundary. This is a deliberate scope reduction, not
-a claim that CMVP forbids hybrid KEMs.
+- preserve v3 read compatibility and never reinterpret v3 bytes;
+- select one exact v4 suite with no negotiation or provider fallback;
+- keep all key establishment, combination, wrapping, payload protection,
+  signing, DRBG state, and SSP lifecycle inside the candidate core;
+- use NIST-standardized post-quantum and symmetric algorithms where the v4
+  security design permits;
+- preserve the classical-plus-post-quantum hedge unless a recorded threat and
+  interoperability review justifies an ML-KEM-only suite;
+- release no cryptographic output before startup tests and no decrypt output
+  before complete authentication;
+- describe every result as local restricted-profile metadata, never approval or
+  validation.
 
-The current IG also permits a fixed Scenario 2 hybrid. If v4 must preserve a
-classical-plus-post-quantum hedge, the project may select that profile before
-the wire format freezes. It would require module-enforced predefined
-components and ordering, an approved combiner, additional testing, and X25519
-classified as non-approved but allowed with no security claimed. X25519 could
-not be exposed as an independent approved service. Written Security Policy
-instructions alone would not enforce those restrictions.
+## Open suite decision
 
-## Proposed fixed v4 suite
+The architecture review must choose exactly one of these before a production
+`SuiteId` or wire byte exists:
 
-| Purpose | Proposed construction | Boundary rule |
+| Candidate | Construction | Tradeoff |
 | --- | --- | --- |
-| Recipient key establishment | ML-KEM-1024, FIPS 203 and SP 800-227 | KeyGen, Encaps, Decaps, both key checks, and implicit rejection stay inside |
-| File-key wrapping | AES-256-KW, SP 800-38F | The ML-KEM 256-bit shared-secret key is the KEK; no baseline KDF |
-| Payload protection | AES-256-GCM, SP 800-38D | Module-internal 96-bit random IV per record and a full 128-bit tag |
-| Random-bit generation | HMAC_DRBG with SHA2-512 | Linux getrandom supplies instantiate/reseed entropy only, never service output |
-| Signature | Pure ML-DSA-87; hedged by default | Deterministic only after the documented assessment and CSTL acceptance |
-| PQ prerequisites | SHA3-256, SHA3-512, SHAKE128, SHAKE256 | Every distinct implementation path is tested |
-| Module integrity candidate | HMAC-SHA2-512 | Exact authenticated extent/key placement remain a lab packaging decision |
+| Fixed hybrid | X25519 plus ML-KEM-1024 combined by a fixed, domain-separated KDF | Preserves the v3 defense-in-depth rationale but adds a non-NIST primitive and more combination/testing surface. |
+| ML-KEM only | ML-KEM-1024 key establishment | Narrower implementation and vector surface, but removes the classical hedge that v3 deliberately provides. |
 
-FIPS 204 defaults to hedged signing. The deterministic variant remains
-conditional on a documented side-channel and fault-attack assessment and CSTL
-acceptance; otherwise the profile must use hedged ML-DSA with module-generated
-randomness.
+This choice is a product security decision, not a certification shortcut. It
+must be documented against store-now-decrypt-later goals, implementation
+diversity, cryptanalytic failure modes, recipient-key migration, and v3/v4
+interoperability. Silent runtime choice between the candidates is forbidden.
 
-For each file, the module generates one fresh AES-256 content-encryption key.
-For each recipient, ML-KEM Encaps returns a ciphertext and shared-secret key;
-the module uses that recipient-specific key directly as the AES-256-KW
-key-encryption key to wrap the file key, then zeroizes the KEM secret. SP
-800-227 defines an established shared-secret key as usable directly as a
-symmetric key or keying material. The CST laboratory must approve this exact
-use and MIS categorization before freeze.
+## Components common to the baseline
 
-Each payload record receives a fresh module-DRBG-generated IV. Associated data
-binds the immutable canonical header, record index, and final-record marker.
-An empty file still has a terminal authenticated record. The module outputs no
-record plaintext until that record's GCM tag succeeds. The outer ANUBIS safe
-API must stage those authenticated records and publish nothing until every
-record, the terminal condition, and the caller's signature policy succeed. The
-design must enforce SP 800-38D's RBG-based construction limit across all
-instances using a given key, fail or rekey before the bound, and satisfy current
-IG C.H. ACVP does not establish IV uniqueness.
+| Purpose | Candidate construction | Required boundary rule |
+| --- | --- | --- |
+| Post-quantum key establishment | ML-KEM-1024, FIPS 203 and SP 800-227 | KeyGen, Encaps, Decaps, key checks, and implicit rejection stay inside |
+| Hybrid combination if selected | Fixed X25519 plus ML-KEM-1024 input to a domain-separated NIST KDF profile | Both contributions and ordering are mandatory; neither is a separately selectable service |
+| File-key wrapping | AES-256-KW, SP 800-38F | The exact KEK derivation is frozen with the suite; raw shared secrets and KEKs never leave |
+| Payload protection | AES-256-GCM, SP 800-38D | Core-generated unique IV per record and full authentication tag |
+| Random-bit generation | HMAC_DRBG with SHA2-512 | OS randomness supplies complete instantiate/reseed requests only, never caller-visible raw output |
+| Signature | ML-DSA-87, FIPS 204 | Hedged signing unless a recorded side-channel and fault analysis supports the standardized deterministic variant |
+| Prerequisites | SHA2-512, HMAC-SHA2-512, SHA3-256, SHA3-512, SHAKE128, SHAKE256 | Every distinct compiled implementation path is inventoried and tested |
+| Core integrity candidate | HMAC-SHA2-512 | Authenticated extent, key placement, loader order, and build integration must be frozen before release |
 
-The signature context is proposed as ASCII anubis-v4-file. ML-DSA signs the
-canonical byte transcript incrementally from the v4 version through the final
-GCM record, excluding the signature trailer. If the implementation cannot
-provide a lab-acceptable streaming pure interface, standardized HashML-DSA is
-an explicit alternative suite decision, never a silent substitution.
+The exact KDF profile, direct-versus-derived KEK decision, GCM IV construction,
+DRBG instantiate/reseed policy, signature interface, and integrity packaging
+remain unresolved. No implementation may choose defaults implicitly.
+
+## Payload and transcript rules to freeze
+
+For each file, the core owns one non-cloneable content-encryption key. For each
+recipient, key establishment and any hybrid combination produce
+recipient-specific keying material used only through the frozen wrap profile;
+all shared secrets and KEKs are cleaned on success and every error path.
+
+Each payload record receives a core-owned IV reserved atomically before output.
+Associated data must bind the immutable canonical header, record index, and
+terminal marker. An empty file must still have an authenticated terminal
+record. The core outputs no record plaintext until its tag succeeds. The outer
+safe API stages authenticated records and publishes nothing until all records,
+the terminal condition, required signature disposition, and caller policy
+succeed.
+
+The signature transcript must be byte-exact, domain separated, and cover the
+canonical container from its version token through the final encrypted record,
+excluding only the signature trailer defined by the frozen grammar. Pure versus
+standardized pre-hash ML-DSA is an explicit suite decision, never a silent
+substitution.
 
 ## Production API restrictions
 
-- one exact suite identifier and no negotiation or provider fallback;
-- no caller-supplied GCM IV;
-- no raw ML-KEM shared-secret output;
-- no generic AES, hash, HMAC, SHAKE, or DRBG production API;
-- no expanded private-key import path merely because ACVP needs a lab hook;
-- generic decryption failure for decapsulation, key-check, unwrap, tag, final
-  record, and required-signature failure;
-- an unambiguous approved-service indicator returned with each completed
-  service;
-- no cryptographic data output before successful integrity and algorithm
-  self-tests or after entry into the latched error state.
+- no caller-supplied IV, entropy, seed, or DRBG state;
+- no raw ML-KEM or hybrid shared-secret output;
+- no generic AES, hash, HMAC, SHAKE, KDF, or DRBG API;
+- no expanded private-key import path merely because local vectors need a test
+  hook;
+- one externally indistinguishable decryption failure for key establishment,
+  unwrap, tag, terminal, and required-signature rejection;
+- result-bound restricted-profile classification returned only with a completed
+  owned output;
+- no data output before successful integrity and algorithm tests, during
+  on-demand tests, or after error/zeroization.
 
-## Baseline ACVP scope
+## Local vector and ACVP-compatible adapter scope
 
-The adapter must call the exact compiled in-boundary implementation and
-register only shipped capabilities:
+The deterministic test adapter must call the exact compiled in-boundary
+implementation and expose only frozen capabilities needed for authoritative
+vectors:
 
-- AES forward and inverse prerequisite implementation;
-- AES-GCM encrypt/decrypt with the selected key, IV, and tag profile;
-- AES-KW wrap/unwrap with the selected KEK and payload-key profile;
-- SHA2-512 and HMAC-SHA2-512;
-- HMAC_DRBG with SHA2-512;
+- AES forward/inverse prerequisites, AES-GCM, and AES-KW;
+- SHA2-512, HMAC-SHA2-512, and HMAC_DRBG;
 - SHA3-256, SHA3-512, SHAKE128, and SHAKE256;
-- ML-KEM-1024 KeyGen plus EncapDecap encapsulation, decapsulation, both key
-  checks, valid paths, and implicit-rejection paths;
-- ML-DSA-87 KeyGen, pure SigGen using the lab-approved hedged or deterministic
-  variant, and SigVer with the external interface and seed key format.
+- ML-KEM-1024 KeyGen, encapsulation, decapsulation, key checks, valid paths, and
+  implicit-rejection paths;
+- ML-DSA-87 KeyGen, the selected SigGen variant, SigVer, and pairwise checks;
+- X25519 and the exact combiner only if the fixed hybrid is selected.
 
-The current ML-KEM and ML-DSA ACVP schemas are evolving work products. The
-adapter must query the service and the laboratory must approve the exact
-production registrations at test time rather than freezing today's draft
-revision names into the protocol.
+The adapter is test-only, must not add a production primitive API, and must be
+checked for equivalence with the release provider. Passing public vectors or an
+ACVP-compatible local session remains developer evidence and must never be
+reported as CAVP validation.
 
-The local dependency graph currently reaches Keccak/SHAKE through distinct
-wrapper paths for ML-KEM and ML-DSA. One algorithm certificate cannot be
-assumed to cover both implementations. Before freeze, either consolidate on
-one provider path or have the laboratory enumerate and test every distinct
-implementation. CPU feature selection creates the same concern for portable
-and accelerated paths; the first certificate should freeze one tested path or
-explicitly cover each path.
+Distinct SHAKE wrappers, CPU feature paths, portable versus accelerated code,
+and platform-specific provider branches are separate implementations until
+evidence demonstrates otherwise. Consolidate them or inventory and test each
+supported path.
 
-## Required module self-tests
+## Required core self-tests
 
-The lab-reviewed startup inventory must include:
+The project-owned inventory must cover:
 
-- the software integrity verification and prerequisite CAST ordering;
-- CASTs for AES, GCM, KW, SHA2-512, HMAC-SHA2-512, every SHA3/SHAKE
-  implementation, and HMAC_DRBG operations;
-- ML-KEM Encaps, Decaps, implicit-rejection, and KeyGen paths;
-- ML-DSA SigGen, SigVer, and KeyGen paths, including applicable ML-DSA-87
-  sampling/rejection paths;
-- pairwise consistency tests for generated ML-KEM and ML-DSA key pairs;
-- on-demand initiation, failure injection, data-output inhibition, latched
-  error behavior, and explicit zeroization result.
+- prerequisite test ordering and software integrity verification;
+- known-answer tests for every enabled symmetric, hash, HMAC, SHAKE, KDF, and
+  DRBG operation;
+- ML-KEM encapsulation, decapsulation, implicit rejection, KeyGen, and checks;
+- ML-DSA generation, signing, verification, sampling/rejection, and pairwise
+  consistency paths;
+- X25519 and hybrid-combiner paths if the fixed hybrid is selected;
+- on-demand initiation, failure injection, output inhibition, latched error,
+  terminal zeroization, and cleanup outcomes.
 
-Developer unit tests, Kani proofs, and ACVP vectors do not replace these
-module-executed self-tests.
+Unit tests, bounded proofs, and local vectors do not replace core-executed
+self-tests.
 
-## Architecture-checkpoint decisions
+## Architecture decision gate
 
-The CST laboratory must close these before a production SuiteId exists:
+Before a production `SuiteId` exists, record independent review of:
 
-- direct KEM-key-as-KEK use and AES-KW service categorization;
-- GCM IV construction, invocation cap, AAD, header canonicalization, record
-  geometry, and terminal rule;
-- HMAC_DRBG instantiate/reseed policy, entropy request, nonce,
-  personalization, claimed strength, and ESV route;
-- pure streaming ML-DSA versus standardized HashML-DSA;
-- whether signatures are mandatory, optional, or excluded from the first
-  certificate;
+- fixed hybrid versus ML-KEM only and the exact combiner/KDF;
+- KEK derivation, AES-KW profile, and SSP lifetimes;
+- GCM IV construction, per-key invocation accounting, AAD, header
+  canonicalization, record geometry, and terminal rule;
+- HMAC_DRBG instantiate/reseed policy, entropy request, personalization,
+  strength target, fork/snapshot handling, and fail-before-output behavior;
+- pure versus standardized pre-hash ML-DSA and signature requirement policy;
 - integrity algorithm, key placement, authenticated extent, package layout,
-  loader behavior, and operational environment;
-- ACVP test-interface equivalence to the production module.
+  loader behavior, and supported operational environment;
+- test-adapter equivalence to the production core;
+- FFI concurrency, one authoritative lifecycle/DRBG owner, and rollback.
 
-Primary sources: [current FIPS 140-3 IG](https://csrc.nist.gov/csrc/media/Projects/cryptographic-module-validation-program/documents/fips%20140-3/FIPS%20140-3%20IG.pdf),
+Primary sources: [FIPS 203](https://csrc.nist.gov/pubs/fips/203/final),
+[FIPS 204](https://csrc.nist.gov/pubs/fips/204/final),
 [SP 800-227](https://csrc.nist.gov/pubs/sp/800/227/final),
+[SP 800-56C Rev. 2](https://csrc.nist.gov/pubs/sp/800/56/c/r2/final),
 [SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final),
-[SP 800-38F](https://csrc.nist.gov/pubs/sp/800/38/f/final),
-[CAVP prerequisites](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/prerequisites),
-[ML-KEM ACVP](https://pages.nist.gov/ACVP/draft-celi-acvp-ml-kem.html), and
-[ML-DSA ACVP](https://pages.nist.gov/ACVP/draft-celi-acvp-ml-dsa.html).
+[SP 800-38F](https://csrc.nist.gov/pubs/sp/800/38/f/final), and
+[CAVP prerequisites](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program/prerequisites).

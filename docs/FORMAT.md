@@ -1679,7 +1679,7 @@ auto-upgrade path.
 
 ### 15.5 Reserved v4 candidate token
 
-`anubis-encryption.org/v4` is reserved for the additive approved-algorithm
+`anubis-encryption.org/v4` is reserved for the additive restricted-profile
 candidate. The current software recognizes that token as distinct from v3 but
 does not parse or write a v4 container. It MUST refuse with an explicit v4
 disabled result and MUST NOT retry the v3 parser, relabel the bytes, or emit v3

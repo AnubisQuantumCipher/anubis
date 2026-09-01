@@ -6,5 +6,7 @@ flowchart LR
     G --> O[Plaintext destination]
     M[Bulk migration / re-encryption] --> R
     E[Formal and test pipeline] --> B[Revision-bound evidence bundle]
-    B --> U
-    N[NIST standards / CAVP / CMVP] -. external validation still required .-> R
+    B --> L[Machine-readable claim ledger]
+    L --> U
+    N[NIST standards / CAVP / CMVP] --> L
+    F[Optional sponsor-funded external validation] -. official evidence only .-> L

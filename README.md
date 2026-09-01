@@ -9,11 +9,14 @@ CMVP certificate, and has no approved-only mode. See the
 [claim and formal-evidence ledger](docs/ASSURANCE.md) before repeating a FIPS
 or proof claim.
 
-**Validation program:** a real Security Level 1 software-module path is now
-tracked in [docs/cmvp/](docs/cmvp/README.md), including the current official
-source snapshot, requirement gaps, candidate boundary, algorithm profile, and
-laboratory RFQ. Its machine-readable status remains pre-submission and rejects
-any certificate claim.
+**Non-certified v4 engineering:** [docs/cmvp/](docs/cmvp/README.md) tracks a
+restricted NIST-standard profile, selected software-module controls drawn from
+FIPS 140-3, the remaining implementation gaps, and an optional sponsor-funded
+validation path. The machine-readable status says certification is
+**sponsor-deferred and unstarted** and rejects compliance, approved-mode, CAVP,
+CMVP, certificate, and audit claims. People or organizations may fund the
+[separate validation and audit workstream](docs/cmvp/SPONSORSHIP.md); funding
+alone never creates a validation claim or changes the current release gate.
 
 **Zero system dependencies -- no liboqs, no OpenSSL, no cmake.** Every
 cryptographic primitive is a pure-Rust implementation, so `cargo install` works
@@ -642,18 +645,19 @@ FIPS 140-3 defines module Security Levels 1 through 4; there is no Level 5.
 ANUBIS is not validated at any FIPS 140-3 level. Storage-guarded Kani model
 checks now gate specific header-line policy, arithmetic, nonce, armor-policy,
 and plaintext-publication properties, but their scope and non-claims are part
-of the result. The complete ledger and additive approved-algorithm v4 plan are in
-[`docs/ASSURANCE.md`](docs/ASSURANCE.md). The separate
-[CMVP readiness package](docs/cmvp/README.md) identifies every current local
-and external validation gate.
+of the result. The complete ledger and additive restricted-profile v4 plan are
+in [`docs/ASSURANCE.md`](docs/ASSURANCE.md). The separate
+[v4 engineering self-assessment](docs/cmvp/README.md) identifies the active
+project-owned gates and preserves an optional certification resumption path.
 
 **V4 is a fail-closed foundation, not an encryption mode.** The exact outer
 dispatcher recognizes the reserved v4 token without routing it to v3, and the
 CLI refuses it before v3 identity access or plaintext staging. The isolated v4
 core intentionally has no production suite, parser, writer, crypto backend, or
-validation claim. It now owns a pre-operational/self-test/operational/latched
-error scaffold and explicit zeroization result; those are lifecycle controls,
-not working cryptography or conformance evidence.
+validation claim. It now owns ordered self-test phases, operational and latched
+error states, terminal zeroization, best-effort cleanup, and a result-bound
+service gate whose status cannot claim CMVP validation. Those are selected
+software-module controls, not working cryptography or conformance evidence.
 
 **The hybrid rationale.** An attacker must break both X25519 and ML-KEM-1024.
 Neither half is trusted alone: X25519 covers the possibility that the newer
@@ -779,8 +783,8 @@ Layout:
 ```
 crates/anubis-crypto/    library: format, primitives, key handling
 crates/anubis-cli/       binary `anubis`
-crates/anubis-v4-core/   inert v4 suite/provider boundary; no production crypto
-docs/cmvp/               FIPS 140-3 readiness, boundary, sources, and lab RFQ
+crates/anubis-v4-core/   inert v4 lifecycle/output boundary; no production crypto
+docs/cmvp/               v4 engineering profile, self-assessment, and deferred CMVP reference
 docs/FORMAT.md           wire format specification
 docs/ASSURANCE.md        NIST/FIPS claim ledger and formal-evidence boundary
 docs/VERIFYING.md        checking a signature without trusting this software

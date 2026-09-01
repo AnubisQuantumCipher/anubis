@@ -42,12 +42,29 @@ TestCase {
 
     delete status.suite.kdf
     verify(!PluginModel.validStatusRecord(status))
+
+    var approved = completeStatus()
+    approved.suite.approved_only_mode = true
+    verify(!PluginModel.validStatusRecord(approved))
+
+    var validated = completeStatus()
+    validated.suite.fips_140_3_validated = true
+    validated.suite.fips_140_3_certificate = "unverified"
+    verify(!PluginModel.validStatusRecord(validated))
   }
 
   function test_currentStatusRendersExplicitNonValidation() {
     var status = completeStatus()
     compare(PluginModel.fipsChips(status.suite).join("|"),
             "NIST FIPS 203|NIST FIPS 204|PQ CATEGORY 5|NOT FIPS 140-3 VALIDATED")
+  }
+
+  function test_unexpectedPositiveStatusIsRefused() {
+    var status = completeStatus()
+    status.suite.fips_140_3_validated = true
+    status.suite.fips_140_3_certificate = "unverified"
+    compare(PluginModel.fipsChips(status.suite).join("|"),
+            "NIST FIPS 203|NIST FIPS 204|PQ CATEGORY 5|FIPS 140-3 STATUS REFUSED")
   }
 
   function test_legacyStatusIsReadyWithUnstatedAssurance() {
