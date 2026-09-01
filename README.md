@@ -490,6 +490,14 @@ reads its JSON, and draws it; it holds no key material and reaches no
 verification verdict of its own. One instance: opening a container from a file
 manager hands the path to the vault already running.
 
+The status channel is fail-closed: JSON object names must be unique, the
+versioned suite and non-certification tuple must match the reviewed engine
+profile exactly, and the desktop applies a native deadline plus a combined
+raw-output cap. Any stderr rejects the response. Its Poll label reserves a
+fixed slot, so automatic refresh no longer shifts the adjacent status dot or
+the clipped suite readout. Before an accepted status exists, the pinned
+assurance line says the suite and assurance are not stated.
+
 ![Decrypt completed; the inspector promotes both the header MAC and the ML-DSA-87 signature, each with the time its check ran](docs/screenshots/decrypt-verified.png)
 
 Signature checking needs no key, so the vault offers it on a container it
@@ -514,6 +522,12 @@ the app for -- engine state, identity and recipient fingerprints, recent
 operations -- and hand you the app for everything else. It performs no
 operation of its own; everything that changes state lives in the desktop
 application, one click away.
+
+The plugin uses the same duplicate-free, closed status-profile validator. Its
+compact panel shows no NIST/FIPS badge; the full explicit non-validation
+readout belongs to the desktop cockpit. Plugin probing and polling cap their
+work, count bounded output as raw bytes, and enforce TERM-to-KILL deadlines
+before a stale readout can remain indefinitely.
 
 <img src="docs/screenshots/bar-plugin.png" alt="The bar dropdown: identity fingerprints, recent operations, and a button that opens the vault" width="420" align="right">
 

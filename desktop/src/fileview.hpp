@@ -1,12 +1,7 @@
-// A watched file, API-compatible with Quickshell.Io's FileView.
-//
-// The engine rewrites its status file after every operation, including ones
-// run from a terminal. Watching that file is what keeps the vault current
-// without shortening the poll interval, so the surface is right within a
-// moment of a change it did not itself cause.
-//
-// A missing file is an ordinary state here, not an error: a machine that has
-// never run the engine simply has no status file yet.
+// A watched file, API-compatible with Quickshell.Io's FileView. The desktop
+// uses it for settings and for the selected container; the latter is watched
+// without reading its potentially large contents. A missing file is an
+// ordinary state rather than an error.
 #pragma once
 
 #include <QFileSystemWatcher>

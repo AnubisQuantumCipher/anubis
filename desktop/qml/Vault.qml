@@ -538,13 +538,17 @@ Item {
   component ActionButton: Rectangle {
     id: btn
     property string label: ""
+    property string reservedLabel: ""
     property string glyph: ""
     property bool available: true
     property bool primary: false
     property color tone: btn.primary ? root.accent : root.fg
     signal activated
 
-    implicitWidth: btnRow.implicitWidth + (root.padCard * 2)
+    implicitWidth: btnRow.implicitWidth - btnLabel.implicitWidth
+      + Model.stableTextWidth(btnLabel.implicitWidth,
+                              btnReservedLabel.implicitWidth)
+      + (root.padCard * 2)
     implicitHeight: btnRow.implicitHeight + (root.padGroup * 2) - root.padTight
     width: implicitWidth
     height: implicitHeight
@@ -592,11 +596,22 @@ Item {
       }
     }
 
+    // A transient label may be longer than the resting action. Measuring it
+    // outside the Row reserves the slot without drawing or rearranging it.
+    Mono {
+      id: btnReservedLabel
+      visible: false
+      text: btn.reservedLabel
+      font.pixelSize: root.typeBody
+      font.bold: btn.primary
+    }
+
     Row {
       id: btnRow
       anchors.centerIn: parent
       spacing: root.padGroup - root.padTight
       Mono {
+        id: btnGlyph
         anchors.verticalCenter: parent.verticalCenter
         visible: btn.glyph !== ""
         text: btn.glyph
@@ -604,6 +619,7 @@ Item {
         font.pixelSize: root.typeBody
       }
       Mono {
+        id: btnLabel
         anchors.verticalCenter: parent.verticalCenter
         text: btn.label
         color: btn.tone
@@ -1279,6 +1295,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             glyph: Model.GLYPH.refresh
             label: anubis.statusBusy ? "polling" : "poll"
+            reservedLabel: "polling"
             available: !anubis.engineMissing
             onActivated: anubis.refresh()
           }
@@ -1335,7 +1352,7 @@ Item {
           Meta {
             width: footerCol.width
             wrapMode: Text.WordWrap
-            text: Model.GLYPH.info + "  " + Model.assuranceLine()
+            text: Model.GLYPH.info + "  " + Model.assuranceLine(anubis.status)
             color: Qt.alpha(root.fg, 0.5)
           }
         }

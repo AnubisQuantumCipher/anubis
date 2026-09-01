@@ -158,10 +158,11 @@ mid-group split is the same silent half-truth as an elide.
 
 ## What the colours mean
 
-- **Urgent** means *authentication failed* — an operation that died, a check
-  that did not pass. Nothing else is allowed to borrow it.
-- **Accent** means *verified* — and only when the engine actually verified
-  something.
+- **Urgent** marks a failed or refused result — an operation that died, a check
+  that did not pass, or an unreadable status response.
+- **Accent** is general emphasis for interaction, operational readiness, and
+  successful engine results. Colour alone is never an assurance claim; the
+  accompanying text names the state.
 - **Neutral** covers *unknown* and *not applicable*, including a container from
   an older, unsupported wire format. An old file is not a tampered file, so it
   reads as `unsupported` in a neutral tone, never as a failure.
@@ -172,21 +173,26 @@ mid-group split is the same silent half-truth as an elide.
 - A failed poll clears the status rather than leaving the last good one on
   screen — a dead binary must not go on asserting that everything is fine.
 - A poll is accepted only when the child exits successfully and emits exactly
-  one complete, schema-valid status record. Probe and poll children have fixed
-  deadlines, and status output is capped before it reaches the long-lived
-  readout.
+  one complete, duplicate-free, schema-valid status record. Probe candidates
+  and poll children have TERM-to-KILL deadlines, and status output is capped
+  before it reaches the long-lived readout.
 - The readout's age is always on screen, because every other number depends on
   it.
 - The boundary line is pinned outside the scroll area.
-- The suite readout distinguishes NIST algorithm standards and PQ Category 5
-  from FIPS 140-3 module validation. The current engine explicitly reports and
-  the panel renders `NOT FIPS 140-3 VALIDATED`.
+- The compact panel shows the accepted engine suite but intentionally carries
+  no NIST/FIPS badge. The desktop cockpit is the surface that renders the full
+  reviewed profile and explicit `NOT FIPS 140-3 VALIDATED` state. Neither
+  surface infers module validation from an algorithm publication number.
 - The assurance fields use a versioned status schema. A pre-assurance engine
-  remains usable during a non-atomic upgrade, but renders
-  `FIPS 140-3 STATUS NOT STATED`; partial or unknown assurance schemas are
-  rejected. An unexpected positive validation field renders
-  `FIPS 140-3 STATUS REFUSED`; positive display code is added only through a
-  future evidence-backed schema review.
+  remains usable during a non-atomic upgrade, while partial or unknown
+  assurance schemas are rejected. The current schema is a closed profile: any
+  changed algorithm, standard, category, profile, approved-mode, validation,
+  or certificate field is rejected before it can make the bar `ready`.
+- Poll stdout and stderr are captured only to the cap plus one byte, measured
+  with `wc -c`, and released only after that raw-byte check succeeds.
+  Successful records must leave stderr completely empty, including no
+  whitespace, and the deadline escalates from TERM to KILL. A failed boundary
+  check clears the prior readout.
 - Nothing here claims a behaviour it cannot perform.
 
 Operations are appended by the engine to `~/.local/state/anubis/audit.jsonl`

@@ -171,6 +171,88 @@ private slots:
     QVERIFY(exited.wait(15000));
     QVERIFY(exited.takeFirst().at(0).toInt() != 0);
   }
+
+  void processDeadlineSettlesAndResets() {
+    Process process;
+    StdioCollector output;
+    process.setStdoutSink(&output);
+    process.setTimeoutMs(50);
+    process.setCommand({QStringLiteral("/usr/bin/sh"),
+                        QStringLiteral("-c"),
+                        QStringLiteral("trap '' TERM; exec /usr/bin/sleep 10")});
+
+    QSignalSpy timedExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(timedExit.wait(5000));
+    QVERIFY(process.timedOut());
+    QVERIFY(!process.outputLimitExceeded());
+    QCOMPARE(output.text(), QString());
+
+    process.setTimeoutMs(0);
+    process.setCommand({QStringLiteral("/usr/bin/printf"),
+                        QStringLiteral("current")});
+    QSignalSpy currentExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(currentExit.wait(5000));
+    QVERIFY(!process.timedOut());
+    QVERIFY(!process.outputLimitExceeded());
+    QCOMPARE(output.text(), QStringLiteral("current"));
+  }
+
+  void processOutputLimitIsRawBytesAndResets() {
+    Process process;
+    StdioCollector output;
+    StdioCollector errors;
+    process.setStdoutSink(&output);
+    process.setStderrSink(&errors);
+    process.setMaximumOutputBytes(4);
+
+    process.setCommand({QStringLiteral("/usr/bin/printf"),
+                        QStringLiteral("four")});
+    QSignalSpy exactExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(exactExit.wait(5000));
+    QVERIFY(!process.outputLimitExceeded());
+    QCOMPARE(output.text(), QStringLiteral("four"));
+
+    process.setCommand({QStringLiteral("/usr/bin/printf"),
+                        QStringLiteral("12345")});
+    QSignalSpy oversizedExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(oversizedExit.wait(5000));
+    QVERIFY(process.outputLimitExceeded());
+    QCOMPARE(output.text(), QString());
+
+    process.setMaximumOutputBytes(5);
+    process.setCommand({QStringLiteral("/usr/bin/sh"),
+                        QStringLiteral("-c"),
+                        QStringLiteral("printf 123; printf 456 >&2")});
+    QSignalSpy combinedExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(combinedExit.wait(5000));
+    QVERIFY(process.outputLimitExceeded());
+    QCOMPARE(output.text(), QString());
+    QCOMPARE(errors.text(), QString());
+
+    process.setMaximumOutputBytes(1);
+    process.setCommand({QStringLiteral("/usr/bin/printf"),
+                        QString::fromUtf8("\xC3\xA9")});
+    QSignalSpy multibyteExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(multibyteExit.wait(5000));
+    QVERIFY(process.outputLimitExceeded());
+    QCOMPARE(output.text(), QString());
+
+    process.setMaximumOutputBytes(8);
+    process.setCommand({QStringLiteral("/usr/bin/printf"),
+                        QStringLiteral("reset")});
+    QSignalSpy resetExit(&process, &Process::exited);
+    process.setRunning(true);
+    QVERIFY(resetExit.wait(5000));
+    QVERIFY(!process.outputLimitExceeded());
+    QVERIFY(!process.timedOut());
+    QCOMPARE(output.text(), QStringLiteral("reset"));
+  }
 };
 
 QTEST_GUILESS_MAIN(ProcessLifecycleTest)

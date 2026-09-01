@@ -6,7 +6,17 @@
 #include <cstdlib>
 #include <csignal>
 
-Process::Process(QObject* parent) : QObject(parent) {}
+Process::Process(QObject* parent) : QObject(parent) {
+  mDeadline.setSingleShot(true);
+  connect(&mDeadline, &QTimer::timeout, this, [this] {
+    if (!mRunning || !mProc || mSettled) return;
+    mTimedOut = true;
+    emit timedOutChanged();
+    if (mStdout) mStdout->reset();
+    if (mStderr) mStderr->reset();
+    stop();
+  });
+}
 
 Process::~Process() {
   if (mProc) {
@@ -40,6 +50,20 @@ int Process::processId() const {
   return mProc ? static_cast<int>(mProc->processId()) : 0;
 }
 
+void Process::setTimeoutMs(int timeoutMs) {
+  if (timeoutMs < 0) timeoutMs = 0;
+  if (mTimeoutMs == timeoutMs) return;
+  mTimeoutMs = timeoutMs;
+  emit timeoutMsChanged();
+}
+
+void Process::setMaximumOutputBytes(qint64 maximumOutputBytes) {
+  if (maximumOutputBytes < 0) maximumOutputBytes = 0;
+  if (mMaximumOutputBytes == maximumOutputBytes) return;
+  mMaximumOutputBytes = maximumOutputBytes;
+  emit maximumOutputBytesChanged();
+}
+
 void Process::setRunning(bool running) {
   if (running == mRunning) return;
   if (running) start();
@@ -57,6 +81,17 @@ void Process::start() {
   // later run that emitted nothing or failed before writing.
   if (mStdout) mStdout->reset();
   if (mStderr) mStderr->reset();
+
+  mDeadline.stop();
+  mOutputBytes = 0;
+  if (mTimedOut) {
+    mTimedOut = false;
+    emit timedOutChanged();
+  }
+  if (mOutputLimitExceeded) {
+    mOutputLimitExceeded = false;
+    emit outputLimitExceededChanged();
+  }
 
   // A fresh QProcess per run. Reusing one would carry the previous run's
   // buffered bytes and exit state into this one, which is exactly the sort of
@@ -86,6 +121,7 @@ void Process::start() {
   emit runningChanged();
 
   mProc->start(program, arguments);
+  if (mTimeoutMs > 0) mDeadline.start(mTimeoutMs);
   emit started();
 }
 
@@ -123,6 +159,25 @@ void Process::drain(QProcess::ProcessChannel channel) {
                                : mProc->readAllStandardError();
   if (raw.isEmpty()) return;
 
+  // Once a run has failed its resource boundary, drain the pipe but do not
+  // retain or decode any more of its bytes. The outcome flag, not a plausible
+  // prefix, is the only result the caller may consume.
+  if (mTimedOut || mOutputLimitExceeded) return;
+
+  const qint64 chunkBytes = raw.size();
+  if (mMaximumOutputBytes > 0
+      && (chunkBytes > mMaximumOutputBytes
+          || mOutputBytes > mMaximumOutputBytes - chunkBytes)) {
+    mOutputLimitExceeded = true;
+    emit outputLimitExceededChanged();
+    mDeadline.stop();
+    if (mStdout) mStdout->reset();
+    if (mStderr) mStderr->reset();
+    stop();
+    return;
+  }
+  mOutputBytes += chunkBytes;
+
   // Decoded incrementally: a pipe read can land mid-codepoint, and a naive
   // per-chunk fromUtf8 would turn a split multi-byte character into two
   // replacement characters inside an otherwise valid JSON line.
@@ -145,6 +200,7 @@ void Process::onFailed(QProcess::ProcessError error) {
 void Process::settle(int exitCode, int exitStatus) {
   if (mSettled) return;
   mSettled = true;
+  mDeadline.stop();
 
   if (mProc) {
     drain(QProcess::StandardOutput);

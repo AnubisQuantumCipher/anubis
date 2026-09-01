@@ -107,20 +107,60 @@ function wireFormat(suite) {
   return s.format ? String(s.format) : ""
 }
 
+function exactStringList(value, expected) {
+  if (!Array.isArray(value) || value.length !== expected.length) return false
+  for (var i = 0; i < expected.length; i++)
+    if (value[i] !== expected[i]) return false
+  return true
+}
+
+function exactObjectKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  return exactStringList(Object.keys(value).sort(), expected.slice().sort())
+}
+
+// assurance-v1 is deliberately a closed profile. A future algorithm, mode,
+// or certificate is not a boolean flip: it requires a reviewed schema and UI
+// update before this readout may repeat the claim.
+function currentAssuranceProfile(suite) {
+  var s = suite || {}
+  return exactObjectKeys(s, ["kem", "sig", "aead", "kdf", "format",
+                             "pure_rust", "fips", "nist_standards",
+                             "pq_security_category", "algorithm_profile",
+                             "approved_only_mode", "fips_140_3_validated",
+                             "fips_140_3_certificate"])
+    && s.kem === "X25519+ML-KEM-1024"
+    && s.sig === "ML-DSA-87"
+    && s.aead === "ChaCha20-Poly1305"
+    && s.kdf === "HKDF-SHA512"
+    && s.format === "anubis-encryption.org/v3"
+    && s.pure_rust === true
+    && exactStringList(s.fips, ["203", "204"])
+    && exactStringList(s.nist_standards, ["FIPS 203", "FIPS 204"])
+    && s.pq_security_category === 5
+    && s.algorithm_profile === "portable-v3"
+    && s.approved_only_mode === false
+    && s.fips_140_3_validated === false
+    && s.fips_140_3_certificate === null
+}
+
+function hasAssuranceFields(suite) {
+  var s = suite || {}
+  var names = ["nist_standards", "pq_security_category",
+               "algorithm_profile", "approved_only_mode",
+               "fips_140_3_validated", "fips_140_3_certificate"]
+  for (var i = 0; i < names.length; i++)
+    if (s[names[i]] !== undefined) return true
+  return false
+}
+
 function fipsChips(suite) {
   var s = suite || {}
-  var list = Array.isArray(s.nist_standards) ? s.nist_standards : []
-  var out = []
-  for (var i = 0; i < list.length; i++) out.push("NIST " + String(list[i]))
-  if (typeof s.pq_security_category === "number")
-    out.push("PQ CATEGORY " + String(s.pq_security_category))
-  if (s.fips_140_3_validated === false)
-    out.push("NOT FIPS 140-3 VALIDATED")
-  else
-    out.push(s.fips_140_3_validated === true
-             ? "FIPS 140-3 STATUS REFUSED"
-             : "FIPS 140-3 STATUS NOT STATED")
-  return out
+  if (currentAssuranceProfile(s))
+    return ["NIST FIPS 203", "NIST FIPS 204", "PQ CATEGORY 5",
+            "NOT FIPS 140-3 VALIDATED"]
+  if (hasAssuranceFields(s)) return ["FIPS 140-3 STATUS REFUSED"]
+  return ["FIPS 140-3 STATUS NOT STATED"]
 }
 
 function engineVersion(status) {
@@ -563,13 +603,110 @@ function progressLabel(op, done, total, elapsedMs) {
   return parts.join("  |  ")
 }
 
+// JSON.parse keeps only the last occurrence of a duplicate object member.
+// That behavior is unsafe at an assurance boundary: a raw positive claim
+// followed by the expected negative value would otherwise look ordinary
+// after parsing. Walk the JSON grammar first and require unique decoded member
+// names in every object. JSON.parse still performs the authoritative syntax
+// and value decoding after this structural check.
+function jsonObjectNamesAreUnique(source) {
+  var text = String(source || "")
+  var at = 0
+
+  function skipSpace() {
+    while (at < text.length && /[\t\n\r ]/.test(text.charAt(at))) at += 1
+  }
+
+  function readString() {
+    if (text.charAt(at) !== "\"") throw new Error("expected JSON string")
+    var start = at
+    at += 1
+    while (at < text.length) {
+      var ch = text.charAt(at)
+      if (ch === "\"") {
+        at += 1
+        return JSON.parse(text.slice(start, at))
+      }
+      if (ch === "\\") {
+        at += 1
+        if (at >= text.length) throw new Error("incomplete JSON escape")
+        if (text.charAt(at) === "u") {
+          at += 1
+          for (var digit = 0; digit < 4; digit += 1) {
+            if (at >= text.length || !/[0-9A-Fa-f]/.test(text.charAt(at)))
+              throw new Error("invalid JSON unicode escape")
+            at += 1
+          }
+        } else at += 1
+      } else at += 1
+    }
+    throw new Error("unterminated JSON string")
+  }
+
+  function readValue() {
+    skipSpace()
+    var ch = text.charAt(at)
+    if (ch === "{") { readObject(); return }
+    if (ch === "[") { readArray(); return }
+    if (ch === "\"") { readString(); return }
+    var start = at
+    while (at < text.length
+           && !/[\t\n\r ,\]}]/.test(text.charAt(at))) at += 1
+    if (at === start) throw new Error("expected JSON value")
+  }
+
+  function readObject() {
+    at += 1
+    skipSpace()
+    if (text.charAt(at) === "}") { at += 1; return }
+    var names = Object.create(null)
+    while (at < text.length) {
+      skipSpace()
+      var name = readString()
+      if (names[name] === true)
+        throw new Error("duplicate JSON object member")
+      names[name] = true
+      skipSpace()
+      if (text.charAt(at) !== ":") throw new Error("expected JSON colon")
+      at += 1
+      readValue()
+      skipSpace()
+      if (text.charAt(at) === "}") { at += 1; return }
+      if (text.charAt(at) !== ",") throw new Error("expected JSON comma")
+      at += 1
+    }
+    throw new Error("unterminated JSON object")
+  }
+
+  function readArray() {
+    at += 1
+    skipSpace()
+    if (text.charAt(at) === "]") { at += 1; return }
+    while (at < text.length) {
+      readValue()
+      skipSpace()
+      if (text.charAt(at) === "]") { at += 1; return }
+      if (text.charAt(at) !== ",") throw new Error("expected JSON comma")
+      at += 1
+    }
+    throw new Error("unterminated JSON array")
+  }
+
+  try {
+    readValue()
+    skipSpace()
+    return at === text.length
+  } catch (e) { return false }
+}
+
 // Parse one line of the engine's streaming JSON. A line that is not a
-// complete JSON object is dropped rather than partially interpreted: a
-// half-written progress record must never become a result.
+// complete, duplicate-free JSON object is dropped rather than partially
+// interpreted: a half-written or ambiguous record must never become a result.
 function parseLine(line) {
   var s = String(line || "").replace(/^\s+|\s+$/g, "")
   if (s === "" || s.charAt(0) !== "{") return null
   try {
+    if (!jsonObjectNamesAreUnique(s)) return null
     var o = JSON.parse(s)
     return (o && typeof o === "object" && o.kind) ? o : null
   } catch (e) { return null }
@@ -583,7 +720,11 @@ function validStatusRecord(o) {
   var assuranceSchema = o.status_schema
   if (assuranceSchema !== undefined
       && assuranceSchema !== "anubis-status/assurance-v1") return false
-  if (typeof o.version !== "string" || o.version === "") return false
+  if (typeof o.version !== "string"
+      || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(o.version))
+    return false
+  if (/(?:fips|cmvp|cavp|validated|certified|certificate|compliant)/i.test(o.version))
+    return false
   if (typeof o.generated !== "string" || o.generated === "") return false
   if (!Array.isArray(o.identities) || !Array.isArray(o.recipients)
       || !Array.isArray(o.recent)) return false
@@ -604,13 +745,10 @@ function validStatusRecord(o) {
     for (var a = 0; a < assuranceNames.length; a++)
       if (s[assuranceNames[a]] !== undefined) return false
   } else {
-    if (!Array.isArray(s.nist_standards) || s.nist_standards.length === 0) return false
-    if (typeof s.pq_security_category !== "number"
-        || !isFinite(s.pq_security_category) || s.pq_security_category <= 0) return false
-    if (typeof s.algorithm_profile !== "string" || s.algorithm_profile === "") return false
-    if (s.approved_only_mode !== false) return false
-    if (s.fips_140_3_validated !== false) return false
-    if (s.fips_140_3_certificate !== null) return false
+    if (!exactObjectKeys(o, ["kind", "status_schema", "version", "generated",
+                             "identities", "recipients", "recent", "counts",
+                             "suite"])) return false
+    if (!currentAssuranceProfile(s)) return false
   }
   var c = o.counts
   if (!c || typeof c !== "object") return false
@@ -621,6 +759,16 @@ function validStatusRecord(o) {
       return false
   }
   return true
+}
+
+// Transport acceptance is deliberately stricter than display formatting.
+// In particular, even whitespace on stderr rejects the response; callers may
+// trim only the error text they show after this decision has been made.
+function statusResponseAccepted(record, exitCode, stderrText, protocolValid,
+                                recordCount) {
+  return exitCode === 0 && String(stderrText || "") === ""
+    && protocolValid === true && recordCount === 1
+    && validStatusRecord(record)
 }
 
 // ------------------------------------------------------------- inspector
@@ -1027,11 +1175,23 @@ function boundaryLine() {
   return "This panel renders engine output; it performs no cryptography itself."
 }
 
-function assuranceLine() {
-  return "ML-KEM-1024 and ML-DSA-87 use NIST PQ Category 5 parameter sets. "
-    + "ANUBIS/v3 is not FIPS 140-3 validated and has no approved-only mode. "
-    + "Hybrid mode requires breaking BOTH X25519 and ML-KEM-1024. "
-    + "This panel renders engine output; it performs no cryptography itself. "
-    + "A verified header MAC says the header is intact, not who sent it -- "
-    + "only a signature whose fingerprint you checked out of band says that."
+function assuranceLine(status) {
+  var boundary = "This panel renders engine output; it performs no "
+    + "cryptography itself. A verified header MAC says the header is intact, "
+    + "not who sent it -- only a signature whose fingerprint you checked out "
+    + "of band says that."
+  if (!validStatusRecord(status))
+    return "Engine suite and assurance status are not stated. " + boundary
+
+  var s = status.suite
+  if (status.status_schema === "anubis-status/assurance-v1"
+      && currentAssuranceProfile(s))
+    return "The engine reports ML-KEM-1024 and ML-DSA-87 NIST PQ Category 5 "
+      + "parameter sets. It reports ANUBIS/v3 is not FIPS 140-3 validated "
+      + "and has no approved-only mode. Hybrid mode requires breaking BOTH "
+      + "X25519 and ML-KEM-1024. " + boundary
+
+  return "Legacy engine suite: " + suiteBadge(s)
+    + ". Its NIST PQ category, FIPS 140-3 validation, and approved-only "
+    + "status are not stated. " + boundary
 }

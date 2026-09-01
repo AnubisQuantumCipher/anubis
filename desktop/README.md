@@ -35,8 +35,9 @@ packaging/          desktop entry, icon, MIME type, AppStream, PKGBUILD
 
 The application spawns the `anubis` binary, reads its JSON, and draws it. It
 holds no key material, derives no secret, performs no cryptography, and reaches
-no verification verdict of its own. Every cryptographic claim on screen is the
-engine's own statement, carried through verbatim.
+no verification verdict of its own. Every cryptographic claim on screen must
+be licensed by one complete, accepted engine record; the renderer may explain
+that record, but it never repairs an omitted field or promotes an unknown.
 
 That boundary is the design, not an implementation detail. The GUI process
 never sees a private key, so a bug in the QML cannot leak one.
@@ -110,6 +111,10 @@ The same legend is rendered in the settings sheet (`Ctrl+,`), under
 read once should not pay rent in screen space, so the footer now carries only
 the assurance line.
 
+The Poll action keeps one fixed text slot while its visible label changes to
+`polling`. Automatic refresh therefore does not move the neighbouring state
+dot, action row, or clipped suite readout.
+
 Clicking a fingerprint copies it. Clicking `copy key` copies the full recipient.
 Clicking the brand opens the about sheet.
 
@@ -174,12 +179,13 @@ exactly the mistaken-identity error the fingerprint exists to prevent.
 
 ### What the colours mean
 
-- **Urgent** means *authentication failed* — a header MAC that did not verify,
-  a signature that did not check out, an operation that died. Nothing else is
-  allowed to borrow it.
-- **Accent** means *verified* — and only when the engine actually verified
-  something. A header nobody could check leaves the card neutral rather than
-  taking an unearned pass.
+- **Urgent** marks a failed or refused result — a header MAC that did not
+  verify, a signature that did not check out, a failed operation, or an
+  unreadable status response.
+- **Accent** is general emphasis for focus, primary actions, operational
+  readiness, and positive engine verdicts. Colour alone is never an assurance
+  claim; the adjacent label names the actual state. A header nobody could
+  check remains explicitly `NOT DETERMINABLE HERE`.
 - **Neutral** covers *unknown* and *not applicable*, including a container from
   an older, unsupported wire format. An old file is not a tampered file.
 
@@ -285,6 +291,15 @@ exit code is zero. Stream collectors and partial-line parsers are reset before
 every launch, and cancelled inspections are generation-bound and queued until
 the previous child has actually exited.
 
+Status polling is additionally bounded by a native deadline and a combined
+raw-byte output limit. Either breach terminates the child, discards its partial
+answer, clears the prior status when the child settles, and renders the
+refusal. A completed status response that writes anything to stderr is also
+rejected, including whitespace-only diagnostics. Duplicate decoded JSON object
+names are rejected before `JSON.parse` can collapse them. These controls apply
+only to the short status reader; they do not cap streaming encryption or
+decryption.
+
 The address book is read and written only through the engine, so there is one
 parser and no write race with a concurrent CLI invocation.
 
@@ -319,6 +334,9 @@ that exists and cannot be decrypted.
 - A field the engine did not state renders as *not stated*, never as a pass.
 - A failed poll clears the status rather than leaving the last good one on
   screen — a dead binary must not go on asserting that everything is fine.
+- While a poll is in flight, the timestamped last completed observation stays
+  visible and is labelled `polling`; the deadline then replaces it atomically
+  or clears it on failure.
 - Refusals are shown verbatim, and pre-flight refusals happen before any
   subprocess is spawned.
 - Overwriting an existing file always takes a second, explicit click.
@@ -328,23 +346,34 @@ that exists and cannot be decrypted.
   what will be left on disk.
 - The assurance line is pinned outside every scroll area, because it is the
   line that must never be scrolled away.
-- Algorithm-standard chips are rendered as standards, alongside explicit
-  `PQ CATEGORY 5` and `NOT FIPS 140-3 VALIDATED` state from the engine. A FIPS
-  publication number is never rendered as a module-validation claim.
+- Algorithm-standard chips are rendered only after the complete current suite
+  and non-certification tuple matches the reviewed status schema, alongside
+  explicit `PQ CATEGORY 5` and `NOT FIPS 140-3 VALIDATED`. A publication number
+  is never rendered as a module-validation claim.
 - The assurance fields use a versioned status schema. A pre-assurance engine
   remains usable during a non-atomic upgrade, but its validation chip reads
   `FIPS 140-3 STATUS NOT STATED`; partial or unknown assurance schemas are
-  rejected. An unexpected positive validation field renders
-  `FIPS 140-3 STATUS REFUSED`; positive display code is added only through a
+  rejected. Any changed schema-v1 algorithm, standard, category, profile,
+  approved-mode, validation, or certificate field is rejected before display.
+  The defensive formatter labels an assurance-bearing tuple it does not
+  recognize `FIPS 140-3 STATUS REFUSED`; positive display code requires a
   future evidence-backed schema review.
+- Every decoded JSON object member name must be unique, including nested and
+  escaped names, so an earlier contradictory member cannot be hidden by the
+  parser keeping a later duplicate.
+- The pinned assurance line is derived from the accepted status. Before the
+  first answer, after a failed poll, or for an unreviewed record it says the
+  suite and assurance are not stated rather than repeating hard-coded claims.
 - **The cipher suite is never guessed.** When the engine has not stated one the
   surface says `SUITE NOT STATED`, in the neutral tone. It used to fall back to
   a hardcoded X25519 + ML-KEM-1024 / ML-DSA-87 with FIPS 203 and 204 chips —
-  painted in the accent colour that here means *verified* — after every failed
-  poll, and over a binary that could not execute at all. Guessing a cipher
+  painted as though current — after every failed poll, and over a binary that
+  could not execute at all. Guessing a cipher
   suite is the one guess an encryption tool must never make.
 
 Operations are appended by the engine to `~/.local/state/anubis/audit.jsonl`.
+The engine writes no `status.json`; the desktop refreshes after its own actions
+and uses its bounded periodic poll to observe external changes.
 
 ## Licence
 

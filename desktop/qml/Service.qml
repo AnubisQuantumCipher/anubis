@@ -48,6 +48,12 @@ Item {
   readonly property bool engineMissing: engineProbed && enginePath === ""
   readonly property string installHint: Model.installHint()
 
+  // A status record is small, fixed-shape control data. Bound the native
+  // child before its bytes reach the long-lived QML collectors; encrypt and
+  // decrypt streams do not inherit either limit.
+  readonly property int maxStatusOutputBytes: 4194304
+  readonly property int statusTimeoutMs: 15000
+
   // ---- status --------------------------------------------------------------
   property var status: null
   property string statusError: ""
@@ -362,7 +368,10 @@ Item {
     statusProc.running = true
   }
 
-  function applyStatus(raw, stderrText, exitCode) {
+  function applyStatus(raw, stderrText, exitCode, timedOut,
+                       outputLimitExceeded) {
+    var rawStderr = String(stderrText || "")
+    var displayStderr = rawStderr.replace(/^\s+|\s+$/g, "")
     var parsed = null
     var parsedCount = 0
     var protocolValid = true
@@ -377,10 +386,18 @@ Item {
         } else protocolValid = false
       }
     }
-    if (exitCode !== 0 || !protocolValid || parsed === null
-        || parsedCount !== 1) {
+    if (timedOut === true) {
       status = null
-      statusError = stderrText !== "" ? stderrText
+      statusError = "anubis status timed out"
+    } else if (outputLimitExceeded === true) {
+      status = null
+      statusError = "status output exceeded the safe readout limit"
+    } else if (!Model.statusResponseAccepted(parsed, exitCode, rawStderr,
+                                              protocolValid, parsedCount)) {
+      status = null
+      statusError = rawStderr !== ""
+        ? (displayStderr !== "" ? displayStderr
+                                : "anubis status wrote to stderr")
         : (exitCode === 127 ? "anubis could not execute"
             : (exitCode !== 0 ? "anubis status exited " + exitCode
                               : "status produced no complete payload"))
@@ -838,6 +855,8 @@ Item {
 
   Process {
     id: statusProc
+    timeoutMs: root.statusTimeoutMs
+    maximumOutputBytes: root.maxStatusOutputBytes
     property string outText: ""
     property string errText: ""
     property int exitCode: 0
@@ -847,7 +866,8 @@ Item {
 
     function settle() {
       if (!exited || !outDone || !errDone) return
-      root.applyStatus(outText, errText.replace(/^\s+|\s+$/g, ""), exitCode)
+      root.applyStatus(outText, errText, exitCode,
+                       statusProc.timedOut, statusProc.outputLimitExceeded)
     }
 
     stdout: StdioCollector {
@@ -1040,21 +1060,10 @@ Item {
     onTriggered: root.nowMs = Date.now()
   }
 
-  // The engine rewrites status.json after every operation, including ones run
-  // from a terminal. Watching it keeps the panel current without shortening
-  // the poll interval.
-  FileView {
-    id: stateWatch
-    path: root.stateDir + "/status.json"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: stateSettle.restart()
-  }
-
-  // The selected container is watched independently of status.json. A change
-  // invalidates inspection and verification immediately; the follow-up read
-  // is debounced for atomic replacement. Contents are not loaded by FileView
-  // because the engine's inspect is the only reader needed here.
+  // The selected container is watched independently. A change invalidates
+  // inspection and verification immediately; the follow-up read is debounced
+  // for atomic replacement. Contents are not loaded by FileView because the
+  // engine's inspect is the only reader needed here.
   FileView {
     id: inspectedFileWatch
     readContents: false
@@ -1063,14 +1072,6 @@ Item {
     printErrors: false
     onFileChanged: root.invalidateInspectedFile()
   }
-
-  Timer {
-    id: stateSettle
-    interval: 250
-    repeat: false
-    onTriggered: root.refresh()
-  }
-
 
   Timer {
     id: inspectChangeSettle
