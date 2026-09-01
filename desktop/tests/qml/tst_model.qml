@@ -14,6 +14,7 @@ TestCase {
   function completeStatus() {
     return {
       kind: "status",
+      status_schema: "anubis-status/assurance-v1",
       version: "test",
       generated: "now",
       identities: [],
@@ -27,7 +28,13 @@ TestCase {
         kdf: "kdf",
         format: "format",
         pure_rust: true,
-        fips: []
+        fips: ["203", "204"],
+        nist_standards: ["FIPS 203", "FIPS 204"],
+        pq_security_category: 5,
+        algorithm_profile: "portable-v3",
+        approved_only_mode: false,
+        fips_140_3_validated: false,
+        fips_140_3_certificate: null
       }
     }
   }
@@ -39,6 +46,31 @@ TestCase {
     var partial = completeStatus()
     delete partial.counts.failed
     verify(!Model.validStatusRecord(partial))
+
+    var ambiguous = completeStatus()
+    delete ambiguous.suite.fips_140_3_validated
+    verify(!Model.validStatusRecord(ambiguous))
+
+    var unknownSchema = completeStatus()
+    unknownSchema.status_schema = "unknown"
+    verify(!Model.validStatusRecord(unknownSchema))
+  }
+
+  function test_legacyStatusRemainsUsableButAssuranceIsNotStated() {
+    var legacy = completeStatus()
+    delete legacy.status_schema
+    delete legacy.suite.nist_standards
+    delete legacy.suite.pq_security_category
+    delete legacy.suite.algorithm_profile
+    delete legacy.suite.approved_only_mode
+    delete legacy.suite.fips_140_3_validated
+    delete legacy.suite.fips_140_3_certificate
+    verify(Model.validStatusRecord(legacy))
+    compare(Model.fipsChips(legacy.suite).join("|"),
+            "FIPS 140-3 STATUS NOT STATED")
+
+    legacy.suite.nist_standards = ["FIPS 203"]
+    verify(!Model.validStatusRecord(legacy))
   }
 
   function test_contentIdIsExactLowercaseSha512Hex() {

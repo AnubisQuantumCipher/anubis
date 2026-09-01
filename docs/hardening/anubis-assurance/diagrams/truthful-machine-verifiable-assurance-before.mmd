@@ -1,0 +1,11 @@
+flowchart LR
+    U[CLI / Vault / Plugin] --> V3[ANUBIS v3 engine]
+    C[Untrusted container] --> P[Shared v3 parser]
+    V3 --> P
+    P --> K[Hybrid KEM and key derivation]
+    K --> A[ChaCha20-Poly1305 STREAM]
+    A --> G[Publication gate]
+    G --> O[Plaintext destination]
+    D[Format and security claims] -. manual alignment .-> V3
+    H[Local tests and Kani harnesses] -. partial evidence .-> V3
+    N[NIST standards and CMVP rules] -. no versioned claim boundary .-> D

@@ -9,6 +9,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  ANUBIS_RUST_VERSION: '1.98.0'
+  ANUBIS_KANI_VERSION: '0.67.0'
+  ANUBIS_KANI_X86_64_SHA256: '3b5f7afd3b51603ee720db7bc1bc4fe46b5a4f5d36daad9939c4b4c658b51ac0'
+
+permissions:
+  contents: read
 
 jobs:
   engine:
@@ -19,15 +25,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Toolchain
         run: |
-          rustup toolchain install stable --profile minimal \
+          rustup toolchain install "$ANUBIS_RUST_VERSION" --profile minimal \
             --component rustfmt --component clippy
-          rustup default stable
+          rustup default "$ANUBIS_RUST_VERSION"
+          test "$(rustc --version | awk '{ print $2 }')" = "$ANUBIS_RUST_VERSION"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Cargo.lock is committed because this workspace ships a binary, so the
       # build must be reproducible. --locked makes CI fail rather than quietly
@@ -125,12 +132,15 @@ jobs:
             git cmake ninja gcc qt6-base qt6-declarative qt6-svg \
             desktop-file-utils appstream
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build
         run: |
           cmake -S desktop -B desktop/build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build desktop/build
+
+      - name: Test process lifecycle
+        run: ctest --test-dir desktop/build --output-on-failure
 
       - name: Lint QML
         run: |
@@ -145,3 +155,56 @@ jobs:
         run: |
           desktop-file-validate desktop/packaging/dev.anubis.Vault.desktop
           appstreamcli validate --no-net desktop/packaging/dev.anubis.Vault.metainfo.xml
+
+  formal:
+    name: storage-guarded Kani proofs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install "$ANUBIS_RUST_VERSION" --profile minimal
+          rustup default "$ANUBIS_RUST_VERSION"
+          test "$(rustc --version | awk '{ print $2 }')" = "$ANUBIS_RUST_VERSION"
+
+      # Install directly instead of using the composite Kani action: the
+      # latter currently contains a transitive floating rust-toolchain tag.
+      # The installer crate is version-locked through Cargo, and the much
+      # larger runtime bundle is fetched explicitly and content-pinned.
+      - name: Install pinned Kani verifier
+        run: |
+          set -euo pipefail
+          cargo install --locked --version "$ANUBIS_KANI_VERSION" kani-verifier
+
+          bundle_path=$(mktemp "$RUNNER_TEMP/anubis-kani-bundle.XXXXXX")
+          cleanup_bundle() {
+            case "$bundle_path" in
+              "$RUNNER_TEMP"/anubis-kani-bundle.*) ;;
+              *) echo "refusing unsafe Kani bundle cleanup path: $bundle_path" >&2; return 1 ;;
+            esac
+            if [ -L "$bundle_path" ] || [ ! -f "$bundle_path" ]; then
+              echo "refusing missing or replaced Kani bundle: $bundle_path" >&2
+              return 1
+            fi
+            rm -- "$bundle_path"
+          }
+          trap cleanup_bundle EXIT
+
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "$bundle_path" \
+            "https://github.com/model-checking/kani/releases/download/kani-$ANUBIS_KANI_VERSION/kani-$ANUBIS_KANI_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "$ANUBIS_KANI_X86_64_SHA256" "$bundle_path" \
+            | sha256sum --check --strict
+          cargo kani setup --use-local-bundle "$bundle_path"
+          cleanup_bundle
+          trap - EXIT
+
+          test "$(cargo kani --version)" = "cargo-kani $ANUBIS_KANI_VERSION"
+
+      - name: Run storage-guarded proofs
+        run: |
+          ./scripts/test-kani-cover-gate.sh
+          ./scripts/test-kani-runner-guards.sh
+          ./scripts/kani-bounded.sh

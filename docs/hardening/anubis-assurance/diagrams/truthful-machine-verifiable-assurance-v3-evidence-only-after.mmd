@@ -1,0 +1,12 @@
+flowchart LR
+    U[CLI / Vault / Plugin] --> V3[ANUBIS v3 engine]
+    C[Untrusted container] --> P[Shared v3 parser]
+    V3 --> P
+    P --> K[Existing hybrid and KDF]
+    K --> A[ChaCha20-Poly1305 STREAM]
+    A --> G[Publication gate]
+    G --> O[Plaintext destination]
+    E[Bounded proof and test runner] --> B[Revision-bound evidence bundle]
+    B --> L[Claim ledger with non-claims]
+    L --> U
+    N[NIST standards and CMVP rules] --> L

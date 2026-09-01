@@ -3,6 +3,12 @@
 Post-quantum file encryption. Hybrid X25519 + ML-KEM-1024 key encapsulation,
 optional ML-DSA-87 signatures, ChaCha20-Poly1305 payloads.
 
+**Assurance boundary:** ML-KEM-1024 and ML-DSA-87 are NIST post-quantum
+Category 5 parameter sets. ANUBIS/v3 is **not FIPS 140-3 validated**, has no
+CMVP certificate, and has no approved-only mode. See the
+[claim and formal-evidence ledger](docs/ASSURANCE.md) before repeating a FIPS
+or proof claim.
+
 **Zero system dependencies -- no liboqs, no OpenSSL, no cmake.** Every
 cryptographic primitive is a pure-Rust implementation, so `cargo install` works
 on a stock Arch or Omarchy system with nothing but a Rust toolchain.
@@ -32,8 +38,9 @@ recipient.
 It exists because its predecessor, `anubis-rage` 1.4.0, obtained its
 post-quantum primitives from liboqs, a C library that is not in the Arch
 repositories and could not be installed on Omarchy at all. This is a rewrite
-against pure-Rust FIPS 203 and FIPS 204 implementations, with the same
-algorithms at the same parameter sets.
+against pure-Rust implementations of the FIPS 203 and FIPS 204 algorithm
+specifications, with the same algorithms at the same parameter sets. That
+describes algorithms, not FIPS 140-3 module validation.
 
 What it is not: a key management system, a passphrase-based encryptor, a PGP
 replacement, or audited software. Read [Security posture](#security-posture)
@@ -623,6 +630,14 @@ reduction in risk surface but does not cover the part ANUBIS actually wrote:
 the combiner, the header format, the parser, and the file handling. Composition
 bugs are the most common source of real cryptographic failures.
 
+**NIST wording matters.** The post-quantum parameter sets are Category 5.
+FIPS 140-3 defines module Security Levels 1 through 4; there is no Level 5.
+ANUBIS is not validated at any FIPS 140-3 level. Storage-guarded Kani model
+checks now gate specific header-line policy, arithmetic, nonce, armor-policy,
+and plaintext-publication properties, but their scope and non-claims are part
+of the result. The complete ledger and additive approved-algorithm v4 plan are in
+[`docs/ASSURANCE.md`](docs/ASSURANCE.md).
+
 **The hybrid rationale.** An attacker must break both X25519 and ML-KEM-1024.
 Neither half is trusted alone: X25519 covers the possibility that the newer
 lattice construction or its recent pure-Rust implementations are flawed, and
@@ -701,8 +716,8 @@ documented above.
 
 ## Build from source
 
-Requires a Rust toolchain, edition 2024, Rust 1.85 or newer. Nothing else: no
-C compiler, no CMake, no `pkg-config`, no system cryptographic library.
+The engine requires a Rust toolchain, edition 2024, Rust 1.85 or newer. It
+needs no C compiler, CMake, `pkg-config`, or system cryptographic library.
 
 ```sh
 git clone https://github.com/AnubisQuantumCipher/anubis
@@ -714,12 +729,29 @@ cargo test --all-features
 ./target/release/anubis status
 ```
 
+The formal lane is separate. It additionally requires common Linux host
+utilities (including `bash`, `setsid`, `ps`, `awk`, `tee`, and `rg`) plus the
+version-pinned Kani verifier:
+
+```sh
+cargo install --locked --version 0.67.0 kani-verifier
+cargo kani setup
+./scripts/test-kani-cover-gate.sh
+./scripts/test-kani-runner-guards.sh
+./scripts/kani-bounded.sh
+```
+
+That local setup command downloads Kani's versioned runtime bundle. The CI
+evidence lane additionally fetches the explicit release asset and verifies its
+repository-pinned SHA-256 digest before setup.
+
 Layout:
 
 ```
 crates/anubis-crypto/    library: format, primitives, key handling
 crates/anubis-cli/       binary `anubis`
 docs/FORMAT.md           wire format specification
+docs/ASSURANCE.md        NIST/FIPS claim ledger and formal-evidence boundary
 docs/VERIFYING.md        checking a signature without trusting this software
 docs/verify/             two independent verifiers (POSIX sh + OpenSSL; Python)
 docs/SECURITY.md         threat model and assurance statement

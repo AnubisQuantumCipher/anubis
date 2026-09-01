@@ -19,6 +19,14 @@ engagement. There is no audit report, because there has been no audit. If you
 require audited software, ANUBIS does not currently meet that requirement, and
 no amount of the rest of this document changes that.
 
+**ANUBIS is not FIPS 140-3 validated.** ML-KEM-1024 and ML-DSA-87 are NIST
+post-quantum Category 5 parameter sets, but an algorithm standard and a
+validated cryptographic module are not the same claim. FIPS 140-3 defines
+Security Levels 1 through 4; there is no Level 5. ANUBIS has no CMVP
+certificate and v3 has no approved-only mode. The normative claim taxonomy,
+formal harness inventory, non-claims, and additive v4 candidate architecture
+are maintained in [ASSURANCE.md](ASSURANCE.md).
+
 **ANUBIS composes audited and standardised primitives; it does not implement
 them.** All cryptographic operations are delegated to established Rust
 libraries. ANUBIS supplies the protocol around them: the KEM combiner, the
@@ -70,8 +78,13 @@ security-relevant defect, in rough descending order:
    a decision outside the cryptography.
 
 The format specification states each of these as a normative requirement so
-that a reviewer can check them directly. That is the intended substitute for an
-audit, and it is not equivalent to one.
+that implementations and machine-checkable properties have an exact target.
+It is not equivalent to an audit or certification. Bounded Kani harnesses cover
+selected production arithmetic, nonce, armor-state, parser, and publication
+gates; ordinary adversarial and interoperability tests cover other boundaries.
+Neither evidence class proves the whole cryptosystem. [ASSURANCE.md](ASSURANCE.md)
+records the precise scope instead of collapsing all of it into “formally
+verified.”
 
 **What an adversarial review has already changed.** The following were real
 defects, found by adversarial review of this implementation and closed. They
@@ -650,7 +663,12 @@ on two incompatible formats. `FORMAT.md` section 15 documents this.
 ## 9. Summary
 
 - No third-party audit. None. Weigh that.
+- Not FIPS 140-3 validated; no CMVP certificate or approved-only v3 mode.
+- Category 5 describes the ML-KEM-1024 and ML-DSA-87 parameter sets, not a
+  nonexistent FIPS module level.
 - Audited, standardised primitives; unaudited composition around them.
+- Storage-guarded model checking covers stated implementation properties only;
+  see `ASSURANCE.md` for each proof, reachability gate, and non-claims.
 - Hybrid: an attacker must break both X25519 and ML-KEM-1024.
 - No cryptographically relevant quantum computer is known to exist. The threat
   addressed is store-now-decrypt-later, not a present break.

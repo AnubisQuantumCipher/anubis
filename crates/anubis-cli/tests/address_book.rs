@@ -59,6 +59,19 @@ fn address_book_survives_a_full_round_trip() {
     // The key must survive byte-for-byte, not merely be present.
     assert_eq!(book[0]["key"].as_str().unwrap(), recipient);
 
+    // Algorithm standards must never be laundered into module validation.
+    assert_eq!(status["status_schema"], "anubis-status/assurance-v1");
+    let suite = &status["suite"];
+    assert_eq!(suite["pq_security_category"], 5);
+    assert_eq!(suite["algorithm_profile"], "portable-v3");
+    assert_eq!(suite["approved_only_mode"], false);
+    assert_eq!(suite["fips_140_3_validated"], false);
+    assert!(suite["fips_140_3_certificate"].is_null());
+    assert_eq!(
+        suite["nist_standards"],
+        serde_json::json!(["FIPS 203", "FIPS 204"])
+    );
+
     let (ok, out) = run(
         &home,
         &["recipient", "remove", "--json", "--label", "alice"],

@@ -1,0 +1,14 @@
+flowchart LR
+    U[CLI / Vault / Plugin] --> D[Explicit version dispatch]
+    C[Untrusted container] --> D
+    D --> V3[Isolated v3 compatibility reader]
+    D --> V4[Isolated v4 candidate core]
+    V3 --> G[Typed publication gate]
+    V4 --> S[Fixed approved-algorithm-candidate suite]
+    S --> G
+    G --> O[Plaintext destination]
+    E[Storage-bounded formal and test pipeline] --> B[Revision-bound evidence bundle]
+    B --> L[Machine-readable claim ledger]
+    L --> U
+    N[NIST standards / CAVP / CMVP] --> L
+    N -. external validation still required .-> V4

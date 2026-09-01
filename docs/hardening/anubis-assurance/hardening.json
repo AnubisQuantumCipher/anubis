@@ -1,0 +1,690 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "anubis-assurance",
+  "sourceScan": {
+    "scanId": "fed81f96-bb3e-403e-9fce-b95ca5687c5f",
+    "manifestSha256": "708fd251769ef4ac5ca86edd81b061092c0376c841aa0b0821bed282983639f1",
+    "targetRevision": "8e26122fec7a94afca425abffa2d2c146ce241de",
+    "implementationStartRevision": "f7f37f17cf4be68c49431df91f8d6c7a24d8a993",
+    "sourceDrift": "present"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "The evidence supports one cross-cutting opportunity: isolate a future v4 approved-algorithm candidate while preserving v3 and binding every assurance claim to scoped, storage-bounded machine evidence."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": [
+      "incremental",
+      "medium_term",
+      "foundational"
+    ],
+    "nonNegotiables": [
+      "Preserve supported ANUBIS/v3 decryption and verification compatibility.",
+      "Do not reinterpret the v3 version line with a different cryptographic suite.",
+      "Retain all tactical security remediations throughout migration.",
+      "Never conflate NIST post-quantum security category 5 with a FIPS 140-3 module security level.",
+      "Never claim CAVP or CMVP validation without a certificate covering the exact implementation and operational environment.",
+      "Fail proof runs closed before local or CI storage is exhausted."
+    ],
+    "assumptions": [
+      "No measured latency, throughput, memory, migration-volume, or proof-storage budget was supplied.",
+      "The project will continue to support CLI, Vault, and Omarchy plugin surfaces.",
+      "The operator does not plan to commission a third-party audit.",
+      "Formal verification is desired for stated software and protocol properties but is not treated as a replacement for the CAVP or CMVP process."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "truthful-machine-verifiable-assurance",
+      "title": "Create a truthful, machine-verifiable assurance boundary",
+      "summary": "Version the cryptographic and evidence boundary so category-5 PQ claims, formal results, compatibility, and CMVP non-claims cannot drift together.",
+      "diagnosis": "The scan repeatedly found security properties owned across parser, crypto, I/O, process, UI, dependency-feature, and documentation boundaries. The remediations close the observed paths, but the current v3 suite and evidence remain one manually aligned assurance surface rather than a versioned claim-to-proof boundary.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_61ce296e94ea8662ff9ffb8b",
+          "path": "crates/anubis-crypto/src/format.rs",
+          "claim": "The baseline public safe-decrypt contract allowed provisional plaintext to cross the caller boundary before sender-signature verification."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_76db625f533baa8783a78614",
+          "path": "desktop/qml/Service.qml",
+          "claim": "The baseline desktop trust state was bound to a mutable path rather than immutable content and atomic policy."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_ccbaf15b9000aaed3501ad63",
+          "path": "crates/anubis-crypto/src/hybrid.rs",
+          "claim": "The baseline hybrid implementation did not enforce contributory behavior at the X25519 boundary."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_5cc259216333671f3a069613",
+          "path": "crates/anubis-crypto/Cargo.toml",
+          "claim": "The baseline secret-erasure property depended on disabled dependency features."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_9d9df46d6643ed55c167c261",
+          "path": "crates/anubis-crypto/src/format.rs",
+          "claim": "The baseline Rust structural parser and independent verifier disagreed on signed container acceptance."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_e1639c7a9aa4324d05ea5051",
+          "path": "crates/anubis-crypto/src/format.rs",
+          "claim": "The baseline writer and reader did not share the same recipient geometry ceiling."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "docs/FORMAT.md",
+          "claim": "ANUBIS/v3 fixes X25519 plus ML-KEM-1024, ML-DSA-87, ChaCha20-Poly1305, HKDF-SHA-512, and HMAC-SHA-512 to one wire version."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "crates/anubis-crypto/src/stream.rs",
+          "claim": "The starting revision contains Kani harnesses for nonce injectivity, final-flag separation, and counter guards."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": ".github/workflows/ci.yml",
+          "claim": "The starting revision's CI does not execute the Kani harnesses."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "NIST-FIPS-203",
+          "url": "https://csrc.nist.gov/pubs/fips/203/final",
+          "claim": "FIPS 203 identifies ML-KEM-1024 as security category 5."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "NIST-FIPS-204",
+          "url": "https://csrc.nist.gov/pubs/fips/204/final",
+          "claim": "FIPS 204 identifies ML-DSA-87 as security category 5."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "NIST-FIPS-140-3",
+          "url": "https://csrc.nist.gov/pubs/fips/140-3/final",
+          "claim": "FIPS 140-3 defines four increasing qualitative module security levels and requirements beyond algorithm selection."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "NIST-CAVP-CMVP",
+          "url": "https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Program",
+          "claim": "NIST states that algorithm validation is a prerequisite but not a substitute for cryptographic-module validation."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "source",
+          "path": "docs/SECURITY.md",
+          "claim": "A versioned core and claim ledger would reduce future drift between the suite, implementation state, formal evidence, and user-facing assurance language."
+        }
+      ],
+      "desiredInvariants": [
+        "Every container selects exactly one canonical format and fixed suite; unsupported or ambiguous versions fail closed.",
+        "Every supported v3 container remains readable through an isolated compatibility path unless an explicitly documented security refusal applies.",
+        "A requested v4 write never emits v3 bytes or silently falls back to a legacy suite.",
+        "Plaintext becomes publishable only from a terminal success state covering all required authentication, signer, content, format, and policy checks.",
+        "Every claimed hybrid contribution is contributory and transcript-bound or the operation refuses.",
+        "Every assurance claim identifies its format, suite, source revision, evidence, assumptions, status, consequence ceiling, and non-claims.",
+        "Formal results never imply primitive security, platform behavior, side-channel resistance, CAVP validation, or CMVP validation unless separately established by the proper evidence.",
+        "Proof execution enforces free-space and byte quotas, retains only compact evidence, and cannot replace valid evidence with a failed or partial run."
+      ],
+      "proposalPath": "proposals/truthful-machine-verifiable-assurance.md",
+      "options": [
+        {
+          "optionId": "v3-evidence-only",
+          "title": "Evidence-harden ANUBIS/v3 in place",
+          "kind": "incremental",
+          "summary": "Keep v3 unchanged while adding a revision-bound claim ledger, pinned formal checks, independent vectors, and storage-bounded proof retention.",
+          "diagramPaths": {
+            "before": "diagrams/truthful-machine-verifiable-assurance-before.mmd",
+            "after": "diagrams/truthful-machine-verifiable-assurance-v3-evidence-only-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_61ce296e94ea8662ff9ffb8b",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "A publication-state model detects recurrence, while the staged safe API remains necessary."
+            },
+            {
+              "findingId": "csf_eae655e2268c2ff7817b9e6e",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Operation-evidence tests detect stale promotion; collector reset remains necessary."
+            },
+            {
+              "findingId": "csf_76db625f533baa8783a78614",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Claim tests require content-bound attestations; atomic content and signer checks remain necessary."
+            },
+            {
+              "findingId": "csf_588ce26089cdbc4ef10bd7d0",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Channel-separation tests cover the contract; the CLI refusal remains necessary."
+            },
+            {
+              "findingId": "csf_56b1cb1233c54e1d461d5460",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Generation-state tests cover cancellation; lifecycle binding remains necessary."
+            },
+            {
+              "findingId": "csf_0d5b21a23ecc3a280a0b5da0",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Spec/code differential evidence detects drift; compatibility decoding remains necessary."
+            },
+            {
+              "findingId": "csf_ccbaf15b9000aaed3501ad63",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Contributory-behavior obligations detect recurrence; runtime checks remain necessary."
+            },
+            {
+              "findingId": "csf_0f08d88ff87f4bec498a3cba",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Evidence architecture does not replace atomic no-clobber filesystem publication."
+            },
+            {
+              "findingId": "csf_58df7fb1d2a76abf92e202fc",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Evidence architecture does not replace RAII cleanup and platform tests."
+            },
+            {
+              "findingId": "csf_5cc259216333671f3a069613",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Feature and trait evidence detects drift; zeroizing owners remain necessary."
+            },
+            {
+              "findingId": "csf_9d9df46d6643ed55c167c261",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Parser proofs and independent vectors detect divergence; the shared validator remains necessary."
+            },
+            {
+              "findingId": "csf_e1639c7a9aa4324d05ea5051",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Shared-geometry proof detects mismatch; writer enforcement remains necessary."
+            },
+            {
+              "findingId": "csf_92c997b27c890dde4bd90842",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Resource regression evidence detects unbounded paths; bounded inspection remains necessary."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Revision-bound claims and pinned checks reduce evidence drift, but the v3 suite and composition remain unchanged.",
+              "validationPlan": "Inject stale revisions, missing non-claims, and modeled invariant regressions and require the evidence gate to fail."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No runtime path changes; CI and local proof time increase.",
+              "validationPlan": "Compare runtime benchmarks unchanged and record proof wall time against the same source revision."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Runtime memory is unchanged; proof scratch is isolated under a configured byte quota.",
+              "validationPlan": "Record runtime peak RSS, proof peak scratch bytes, retained bundle bytes, and cleanup remainder."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Failed or stale evidence cannot become current when publication is atomic and schema-gated.",
+              "validationPlan": "Inject proof failure, cancellation, low space, corrupt bundles, and cleanup failure and verify the prior evidence remains current."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "The project must own pinned proof tools, schemas, quotas, and retention policy.",
+              "validationPlan": "Run the complete evidence pipeline on local and hosted CI and document operator recovery from each refusal."
+            },
+            {
+              "dimension": "migration",
+              "direction": "neutral",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "No ciphertext, format, or public runtime migration is required.",
+              "validationPlan": "Run all v3 compatibility fixtures and confirm byte behavior is unchanged."
+            }
+          ],
+          "residualRisks": [
+            "The v3 suite remains outside the proposed approved-algorithm-candidate boundary.",
+            "Formal models may omit production behavior or rely on incorrect assumptions.",
+            "No local evidence creates CAVP or CMVP validation."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              ".github/workflows/",
+              "scripts/",
+              "docs/ASSURANCE.md",
+              "crates/anubis-crypto/src/armor.rs",
+              "crates/anubis-crypto/src/format.rs",
+              "crates/anubis-crypto/src/stream.rs"
+            ],
+            "workPackages": [
+              "Create the claim schema and vocabulary guard.",
+              "Create the quota-enforced disposable proof runner.",
+              "Pin and execute current Kani harnesses and compatibility vectors."
+            ],
+            "acceptanceCriteria": [
+              "Stale or over-broad claims fail closed.",
+              "Repeated proof runs remain within configured storage ceilings.",
+              "All v3 compatibility and security gates remain green."
+            ],
+            "migrationNotes": [
+              "May be introduced without changing runtime defaults."
+            ],
+            "rollback": "Remove the evidence gate while leaving v3 runtime and ciphertext untouched; preserve the last valid evidence bundle for auditability."
+          }
+        },
+        {
+          "optionId": "additive-v4-candidate",
+          "title": "Add an isolated v4 approved-algorithm-candidate core",
+          "kind": "structural",
+          "summary": "Preserve v3 through an isolated compatibility reader while introducing a distinct v4 wire version, fixed candidate suite, typed publication state, and revision-bound formal evidence.",
+          "diagramPaths": {
+            "before": "diagrams/truthful-machine-verifiable-assurance-before.mmd",
+            "after": "diagrams/truthful-machine-verifiable-assurance-additive-v4-candidate-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_61ce296e94ea8662ff9ffb8b",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The v4 core owns a typed terminal publication transition; the v3 staged API remains required."
+            },
+            {
+              "findingId": "csf_eae655e2268c2ff7817b9e6e",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Versioned operation evidence narrows stale promotion, while desktop collector lifecycle remains separately enforced."
+            },
+            {
+              "findingId": "csf_76db625f533baa8783a78614",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The v4 attestation type binds content, format, suite, signer policy, and operation generation; v3 content binding remains required."
+            },
+            {
+              "findingId": "csf_588ce26089cdbc4ef10bd7d0",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "Typed service results narrow protocol mixing, while CLI stdout separation remains required."
+            },
+            {
+              "findingId": "csf_56b1cb1233c54e1d461d5460",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The v4 operation model binds target and generation, while current process cancellation controls remain required."
+            },
+            {
+              "findingId": "csf_0d5b21a23ecc3a280a0b5da0",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "A distinct immutable v4 encoding prevents silent reinterpretation; legacy decode/re-encode compatibility remains required."
+            },
+            {
+              "findingId": "csf_ccbaf15b9000aaed3501ad63",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The v4 specification makes contribution acceptance and transcript binding core invariants; v3 checks remain required."
+            },
+            {
+              "findingId": "csf_0f08d88ff87f4bec498a3cba",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "The crypto-core boundary does not replace atomic filesystem publication."
+            },
+            {
+              "findingId": "csf_58df7fb1d2a76abf92e202fc",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "A typed staging owner narrows cleanup drift; platform RAII and failure tests remain required."
+            },
+            {
+              "findingId": "csf_5cc259216333671f3a069613",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "V4 secret-owning types and provider capabilities make destruction evidence explicit; v3 dependency features remain required."
+            },
+            {
+              "findingId": "csf_9d9df46d6643ed55c167c261",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "One v4 structural validator owns acceptance and is checked against independent vectors; the v3 validator remains required."
+            },
+            {
+              "findingId": "csf_e1639c7a9aa4324d05ea5051",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "Checked v4 geometry is shared by reader and writer; v3 writer enforcement remains required."
+            },
+            {
+              "findingId": "csf_92c997b27c890dde4bd90842",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "The v4 parser contract is bounded, while each CLI and UI adapter still needs resource tests."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Explicit version dispatch and a small typed core centralize suite, parser, transcript, and publication invariants; new design and model risk remain.",
+              "validationPlan": "Require normative spec, pure model, production implementation, and independent vectors to agree on canonical and adversarial cases."
+            },
+            {
+              "dimension": "performance",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "hypothetical",
+              "assessment": "AES-GCM provider performance, header overhead, version dispatch, and hybrid choices can change throughput and latency.",
+              "validationPlan": "Benchmark identical file/pipe, signed/unsigned, recipient-set, and hardware workloads for v3 and v4 before changing defaults."
+            },
+            {
+              "dimension": "memory",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Bounded chunks and parsers can preserve runtime limits, while parallel code and providers increase binary footprint; proof scratch is quota-bounded.",
+              "validationPlan": "Measure peak RSS, binary size, temporary disk, proof scratch, retained evidence, and cleanup remainder."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "Version failures are contained and v3 remains recoverable, but carrying two readers creates maintenance risk.",
+              "validationPlan": "Exercise cross-version refusal, read recovery, opt-in disablement, stale evidence, and rollback with both fixture sets."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "The project must own two readers, suite inventory, evidence gates, resource quotas, and version-aware UI state.",
+              "validationPlan": "Run release and incident playbooks for proof refusal, v4 write disablement, and v3/v4 support diagnosis."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "New APIs, fixtures, documentation, and UI are required, but existing ciphertext is not forced through bulk migration.",
+              "validationPlan": "Introduce read-only then opt-in stages, preserve all v3 fixtures, and complete rollback before any default change."
+            }
+          ],
+          "residualRisks": [
+            "The v4 protocol and implementation can contain new composition defects.",
+            "The v3 compatibility reader remains security-sensitive.",
+            "Formal model-to-code correspondence remains an explicit review obligation.",
+            "Approved algorithms and local conformance vectors do not create CAVP or CMVP validation.",
+            "Platform, dependency, compiler, entropy, I/O, and side-channel behavior remain partly outside the pure formal core."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/anubis-crypto/src/",
+              "crates/anubis-cli/src/",
+              "desktop/",
+              "plugin/khephri.anubis/",
+              "docs/",
+              ".github/workflows/",
+              "scripts/"
+            ],
+            "workPackages": [
+              "Establish the versioned claim/evidence schema and vocabulary guard.",
+              "Build the storage-bounded proof runner and atomic evidence publisher.",
+              "Make the remediated v3 compatibility baseline reproducible.",
+              "Freeze the v4 threat model, suite, hybrid decision, grammar, and failure semantics.",
+              "Implement the isolated v4 checked core and exact version dispatcher.",
+              "Connect pure models, production code, independent vectors, and symbolic protocol claims.",
+              "Integrate truthful format/evidence state into CLI, Vault, and plugin.",
+              "Roll out read-only, opt-in, benchmark, recovery, and default-decision gates."
+            ],
+            "acceptanceCriteria": [
+              "Every claim is revision-bound, scoped, and preserves its non-claims.",
+              "Proof runs remain under configured storage ceilings and fail atomically.",
+              "V3 compatibility and remediated invariants do not regress.",
+              "V3 and v4 are disjoint and requested v4 never falls back.",
+              "The v4 specification, model, independent vectors, and production code agree.",
+              "Rollback disables v4 writes while retaining v3 and created-v4 read access.",
+              "No artifact claims CAVP or CMVP validation without matching external certificate evidence."
+            ],
+            "migrationNotes": [
+              "Start with evidence and read-only dispatch, then explicit opt-in writes.",
+              "Never rewrite existing ciphertext automatically.",
+              "Change defaults only after measured performance, resource, interoperability, recovery, and rollback gates pass."
+            ],
+            "rollback": "Disable new v4 writes, retain the last known-good v4 reader for created data, preserve the v3 reader, and mark affected evidence revoked or superseded without relabeling formats."
+          }
+        },
+        {
+          "optionId": "in-place-replacement",
+          "title": "Replace the current engine and migrate in place",
+          "kind": "foundational",
+          "summary": "Collapse onto one candidate engine and require deployed ciphertext and integrations to migrate rather than carrying a long-lived v3 compatibility reader.",
+          "diagramPaths": {
+            "before": "diagrams/truthful-machine-verifiable-assurance-before.mmd",
+            "after": "diagrams/truthful-machine-verifiable-assurance-in-place-replacement-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_61ce296e94ea8662ff9ffb8b",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "A replacement may own publication safely, but migration introduces another plaintext publication path."
+            },
+            {
+              "findingId": "csf_eae655e2268c2ff7817b9e6e",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Replacing the crypto engine does not inherently redesign desktop collector lifecycle."
+            },
+            {
+              "findingId": "csf_76db625f533baa8783a78614",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "A replacement can use typed attestations, but migration and UI binding remain unspecified."
+            },
+            {
+              "findingId": "csf_588ce26089cdbc4ef10bd7d0",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "A replacement API may separate channels, but no implemented interface establishes that property."
+            },
+            {
+              "findingId": "csf_56b1cb1233c54e1d461d5460",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "Crypto replacement does not inherently fix process cancellation generations."
+            },
+            {
+              "findingId": "csf_0d5b21a23ecc3a280a0b5da0",
+              "effect": "mitigates",
+              "tacticalFixRequired": true,
+              "rationale": "An honestly new version can prevent future encoding ambiguity, but in-place semantics under v3 would recreate the defect."
+            },
+            {
+              "findingId": "csf_ccbaf15b9000aaed3501ad63",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "The replacement combiner and contributory checks are not yet specified."
+            },
+            {
+              "findingId": "csf_0f08d88ff87f4bec498a3cba",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "Migration expands publication work and requires its own atomic no-clobber design."
+            },
+            {
+              "findingId": "csf_58df7fb1d2a76abf92e202fc",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "Bulk migration expands temporary plaintext and ciphertext lifetime."
+            },
+            {
+              "findingId": "csf_5cc259216333671f3a069613",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "Replacement dependency and secret-owner behavior are not yet established."
+            },
+            {
+              "findingId": "csf_9d9df46d6643ed55c167c261",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "A new parser can centralize validation but also creates a fresh differential risk during migration."
+            },
+            {
+              "findingId": "csf_e1639c7a9aa4324d05ea5051",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "Replacement geometry is not yet modeled or implemented."
+            },
+            {
+              "findingId": "csf_92c997b27c890dde4bd90842",
+              "effect": "unknown",
+              "tacticalFixRequired": true,
+              "rationale": "A replacement and migration inventory can each introduce new unbounded input paths."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "unknown",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "One steady-state core reduces duplicated ownership, but bulk decrypt/re-encrypt introduces a privileged plaintext and availability path.",
+              "validationPlan": "Specify and test migration publication, provenance, interruption, resume, and dual verification before touching user data."
+            },
+            {
+              "dimension": "performance",
+              "direction": "unknown",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "Steady-state performance may improve or regress, while migration throughput and downtime dominate rollout.",
+              "validationPlan": "Benchmark the replacement and a full dry-run migration against an inventory-shaped disposable corpus."
+            },
+            {
+              "dimension": "memory",
+              "direction": "unknown",
+              "confidence": "low",
+              "basis": "hypothetical",
+              "assessment": "The core can be bounded, but migration inventory, dual ciphertext retention, and recovery storage are unmeasured.",
+              "validationPlan": "Measure peak RSS, old-plus-new ciphertext storage, temporary plaintext, proof scratch, and backup capacity."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Interruption, missing identities, failed destination publication, and asymmetric rollback can make existing data unavailable.",
+              "validationPlan": "Exercise interruption and restoration at each migration transition while preserving the source container."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Inventory, backup, identity availability, resume, recovery, and incident response become rollout-critical.",
+              "validationPlan": "Complete operator playbooks and a disposable end-to-end recovery exercise before considering migration."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "high",
+              "basis": "source-derived",
+              "assessment": "Existing ciphertext and integrations must move, and code rollback cannot by itself read already-converted data.",
+              "validationPlan": "Prove inventory completeness, preserve dual readers through rollback, and independently verify every converted artifact."
+            }
+          ],
+          "residualRisks": [
+            "Bulk migration exposes more plaintext lifecycle and availability risk than an additive format.",
+            "Changing semantics under the v3 version line would create deliberate format ambiguity.",
+            "Code rollback is insufficient after data conversion without retained compatible readers.",
+            "A replacement core still requires external CAVP and CMVP processes for validation claims."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/",
+              "desktop/",
+              "plugin/",
+              "docs/",
+              "packaging/",
+              "install.sh"
+            ],
+            "workPackages": [
+              "Inventory deployed ciphertext and identity availability without reading user secrets.",
+              "Specify a distinct replacement format and migration state machine.",
+              "Build dual verification, backup, resume, rollback, and recovery tooling.",
+              "Migrate only after source-preserving dry runs and explicit operator approval."
+            ],
+            "acceptanceCriteria": [
+              "Every source container remains intact until the replacement is independently verified.",
+              "Interrupted migration is resumable and rollback retains a compatible reader.",
+              "No replacement bytes use the v3 version line."
+            ],
+            "migrationNotes": [
+              "Not selected under current compatibility and storage constraints.",
+              "Requires a separate data-inventory and recovery decision."
+            ],
+            "rollback": "Retain both readers and original containers; code reversion alone is not a sufficient rollback after conversion."
+          }
+        }
+      ],
+      "recommendedOptionId": "additive-v4-candidate",
+      "recommendation": "Select the additive v4 candidate under current constraints, apply the v3 evidence discipline immediately, keep v4 opt-in until specification, proof, interoperability, resource, recovery, and rollback gates pass, and never describe the result as CAVP or CMVP validated without external certificate evidence.",
+      "implementationPlanPath": "implementation/additive-v4-candidate.md"
+    }
+  ],
+  "openQuestions": [
+    "Which current NIST-approved classical key-establishment method, or explicitly non-approved auxiliary contribution, should the v4 hybrid profile use?",
+    "Which exact approved key-wrap and KDF profiles fit the final v4 transcript and provider boundary?",
+    "What operator-configured free-space, scratch, retained-evidence, benchmark, and CI retention thresholds apply?",
+    "Which formal toolchain beyond Kani is supportable for protocol and model-to-code obligations?",
+    "What observed evidence should govern v4 opt-in, default selection, and long-term v3 writer support?",
+    "Will the project ever pursue the external CAVP and CMVP process, or permanently retain candidate/non-validated language?"
+  ]
+}

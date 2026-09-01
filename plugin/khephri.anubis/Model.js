@@ -109,9 +109,17 @@ function wireFormat(suite) {
 
 function fipsChips(suite) {
   var s = suite || {}
-  var list = Array.isArray(s.fips) ? s.fips : []
+  var list = Array.isArray(s.nist_standards) ? s.nist_standards : []
   var out = []
-  for (var i = 0; i < list.length; i++) out.push("FIPS " + String(list[i]))
+  for (var i = 0; i < list.length; i++) out.push("NIST " + String(list[i]))
+  if (typeof s.pq_security_category === "number")
+    out.push("PQ CATEGORY " + String(s.pq_security_category))
+  if (s.fips_140_3_validated === true)
+    out.push("FIPS 140-3 VALIDATED " + String(s.fips_140_3_certificate))
+  else if (s.fips_140_3_validated === false)
+    out.push("NOT FIPS 140-3 VALIDATED")
+  else
+    out.push("FIPS 140-3 STATUS NOT STATED")
   return out
 }
 
@@ -572,6 +580,9 @@ function parseLine(line) {
 // mandatory and type checked before the record reaches panelState().
 function validStatusRecord(o) {
   if (!o || o.kind !== "status") return false
+  var assuranceSchema = o.status_schema
+  if (assuranceSchema !== undefined
+      && assuranceSchema !== "anubis-status/assurance-v1") return false
   if (typeof o.version !== "string" || o.version === "") return false
   if (typeof o.generated !== "string" || o.generated === "") return false
   if (!Array.isArray(o.identities) || !Array.isArray(o.recipients)
@@ -584,6 +595,26 @@ function validStatusRecord(o) {
   if (typeof s.kdf !== "string" || s.kdf === "") return false
   if (typeof s.format !== "string" || s.format === "") return false
   if (typeof s.pure_rust !== "boolean" || !Array.isArray(s.fips)) return false
+  var assuranceNames = ["nist_standards", "pq_security_category",
+                        "algorithm_profile", "approved_only_mode",
+                        "fips_140_3_validated", "fips_140_3_certificate"]
+  if (assuranceSchema === undefined) {
+    // A pre-assurance engine remains usable, but its missing claim fields are
+    // rendered as NOT STATED. Mixed/partial schemas fail closed.
+    for (var a = 0; a < assuranceNames.length; a++)
+      if (s[assuranceNames[a]] !== undefined) return false
+  } else {
+    if (!Array.isArray(s.nist_standards) || s.nist_standards.length === 0) return false
+    if (typeof s.pq_security_category !== "number"
+        || !isFinite(s.pq_security_category) || s.pq_security_category <= 0) return false
+    if (typeof s.algorithm_profile !== "string" || s.algorithm_profile === "") return false
+    if (typeof s.approved_only_mode !== "boolean") return false
+    if (typeof s.fips_140_3_validated !== "boolean") return false
+    if (s.fips_140_3_validated) {
+      if (typeof s.fips_140_3_certificate !== "string"
+          || s.fips_140_3_certificate === "") return false
+    } else if (s.fips_140_3_certificate !== null) return false
+  }
   var c = o.counts
   if (!c || typeof c !== "object") return false
   var names = ["encrypt", "decrypt", "failed"]
@@ -1000,8 +1031,9 @@ function boundaryLine() {
 }
 
 function assuranceLine() {
-  return "ML-KEM-1024 (FIPS 203) and ML-DSA-87 (FIPS 204) are NIST-standardized; "
-    + "hybrid mode requires breaking BOTH X25519 and ML-KEM-1024. "
+  return "ML-KEM-1024 and ML-DSA-87 use NIST PQ Category 5 parameter sets. "
+    + "ANUBIS/v3 is not FIPS 140-3 validated and has no approved-only mode. "
+    + "Hybrid mode requires breaking BOTH X25519 and ML-KEM-1024. "
     + "This panel renders engine output; it performs no cryptography itself. "
     + "A verified header MAC says the header is intact, not who sent it -- "
     + "only a signature whose fingerprint you checked out of band says that."

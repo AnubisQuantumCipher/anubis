@@ -328,6 +328,13 @@ that exists and cannot be decrypted.
   what will be left on disk.
 - The assurance line is pinned outside every scroll area, because it is the
   line that must never be scrolled away.
+- Algorithm-standard chips are rendered as standards, alongside explicit
+  `PQ CATEGORY 5` and `NOT FIPS 140-3 VALIDATED` state from the engine. A FIPS
+  publication number is never rendered as a module-validation claim.
+- The assurance fields use a versioned status schema. A pre-assurance engine
+  remains usable during a non-atomic upgrade, but its validation chip reads
+  `FIPS 140-3 STATUS NOT STATED`; partial or unknown assurance schemas are
+  rejected.
 - **The cipher suite is never guessed.** When the engine has not stated one the
   surface says `SUITE NOT STATED`, in the neutral tone. It used to fall back to
   a hardcoded X25519 + ML-KEM-1024 / ML-DSA-87 with FIPS 203 and 204 chips —

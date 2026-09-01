@@ -178,6 +178,13 @@ mid-group split is the same silent half-truth as an elide.
 - The readout's age is always on screen, because every other number depends on
   it.
 - The boundary line is pinned outside the scroll area.
+- The suite readout distinguishes NIST algorithm standards and PQ Category 5
+  from FIPS 140-3 module validation. The current engine explicitly reports and
+  the panel renders `NOT FIPS 140-3 VALIDATED`.
+- The assurance fields use a versioned status schema. A pre-assurance engine
+  remains usable during a non-atomic upgrade, but renders
+  `FIPS 140-3 STATUS NOT STATED`; partial or unknown assurance schemas are
+  rejected.
 - Nothing here claims a behaviour it cannot perform.
 
 Operations are appended by the engine to `~/.local/state/anubis/audit.jsonl`

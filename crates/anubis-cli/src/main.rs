@@ -613,6 +613,126 @@ fn cmd_encrypt(
 
 // ----------------------------------------------------------------- decrypt
 
+mod staged_output {
+    use super::*;
+
+    /// Private plaintext output that has not yet passed caller policy.
+    ///
+    /// This type implements staging only.  It intentionally has no publication
+    /// method, so a refactor cannot commit a file or write stdout before converting
+    /// it into [`PolicyAuthorized`].
+    pub(super) struct StagedOutput(StagedKind);
+
+    enum StagedKind {
+        File {
+            writer: std::io::BufWriter<io::NamedTemp>,
+            destination: PathBuf,
+        },
+        /// An unlinked spill file for stdout. Constant memory, and it still gates
+        /// publication because nothing reaches stdout until the whole container
+        /// and caller policy have succeeded.
+        Stdout(std::io::BufWriter<std::fs::File>),
+    }
+
+    /// A stage whose policy verdict succeeded.  The private field means
+    /// [`authorize_stage`] is the only constructor.
+    pub(super) struct PolicyAuthorized<S>(S);
+
+    fn authorize_stage<S, E>(
+        stage: S,
+        policy: core::result::Result<(), E>,
+    ) -> core::result::Result<PolicyAuthorized<S>, E> {
+        policy?;
+        Ok(PolicyAuthorized(stage))
+    }
+
+    #[cfg(kani)]
+    mod publication_proofs {
+        use super::*;
+
+        #[derive(Default)]
+        struct Probe {
+            published: bool,
+        }
+
+        impl PolicyAuthorized<Probe> {
+            fn publish(mut self) -> Probe {
+                self.0.published = true;
+                self.0
+            }
+        }
+
+        /// The exact CLI policy gate yields publication authority only on `Ok`.
+        /// This does not prove that the caller constructed the right policy.
+        #[kani::proof]
+        fn only_successful_policy_yields_cli_publication_capability() {
+            let denied = authorize_stage(Probe::default(), Err::<(), u8>(1));
+            assert!(denied.is_err());
+
+            let allowed = authorize_stage(Probe::default(), Ok::<(), u8>(()));
+            assert!(allowed.is_ok());
+            let probe = allowed.unwrap().publish();
+            assert!(probe.published);
+        }
+    }
+
+    impl StagedOutput {
+        pub(super) fn create(sink: &io::Sink) -> Result<Self> {
+            match sink {
+                io::Sink::File(destination) => Ok(Self(StagedKind::File {
+                    writer: std::io::BufWriter::new(io::NamedTemp::create_beside(destination)?),
+                    destination: destination.clone(),
+                })),
+                io::Sink::Stdout => Ok(Self(StagedKind::Stdout(std::io::BufWriter::new(
+                    io::spill_file().context(
+                        "creating private disk-backed staging for plaintext output on stdout",
+                    )?,
+                )))),
+            }
+        }
+
+        pub(super) fn writer(&mut self) -> &mut dyn Write {
+            match &mut self.0 {
+                StagedKind::File { writer, .. } => writer,
+                StagedKind::Stdout(writer) => writer,
+            }
+        }
+
+        pub(super) fn authorize(self, policy: Result<()>) -> Result<PolicyAuthorized<Self>> {
+            authorize_stage(self, policy)
+        }
+    }
+
+    impl PolicyAuthorized<StagedOutput> {
+        /// The only plaintext publication capability in the CLI decrypt path.
+        pub(super) fn publish(self, force: bool) -> Result<()> {
+            match self.0.0 {
+                StagedKind::File {
+                    writer,
+                    destination,
+                } => {
+                    let tmp = writer.into_inner().map_err(|e| anyhow!("{e}"))?;
+                    tmp.sync_all().context("syncing plaintext")?;
+                    tmp.commit(&destination, force)?;
+                }
+                StagedKind::Stdout(writer) => {
+                    let mut file = writer.into_inner().map_err(|e| anyhow!("{e}"))?;
+                    // The spill file is already unlinked, so failing here leaves
+                    // nothing behind and emits nothing.
+                    io::check_cancelled()?;
+                    file.rewind()?;
+                    let mut stdout = io::CancelWriter::new(std::io::stdout().lock());
+                    std::io::copy(&mut file, &mut stdout)?;
+                    stdout.flush()?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+use staged_output::StagedOutput;
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_decrypt(
     json: bool,
@@ -673,34 +793,14 @@ fn cmd_decrypt(
         let head = &probe[..n];
         let armored = anubis_crypto::armor::looks_armored(head);
 
-        // Stream into a temporary file and rename only after the signature
-        // policy passes. Buffering the plaintext in memory would gate
-        // publication just as well but costs the whole file in RAM, which is
-        // unacceptable for a tool expected to handle large archives.
-        // Stdout uses an unlinked disk spill because bytes cannot be recalled.
-        enum Out {
-            Temp(std::io::BufWriter<io::NamedTemp>),
-            /// An unlinked spill file for stdout. Constant memory, and it
-            /// still gates publication, because nothing reaches stdout until
-            /// the whole container has verified.
-            Spill(std::io::BufWriter<std::fs::File>),
-        }
-        let mut out =
-            match &sink {
-                io::Sink::File(p) => {
-                    let tmp = io::NamedTemp::create_beside(p)?;
-                    Out::Temp(std::io::BufWriter::new(tmp))
-                }
-                io::Sink::Stdout => Out::Spill(std::io::BufWriter::new(io::spill_file().context(
-                    "creating private disk-backed staging for plaintext output on stdout",
-                )?)),
-            };
+        // Stream into private staging and obtain the publication capability
+        // only after cryptography and caller policy both succeed. Buffering in
+        // memory would gate publication too but would scale with plaintext;
+        // these disk-backed stages keep memory bounded.
+        let mut out = StagedOutput::create(&sink)?;
 
         let dec = {
-            let mut w: &mut dyn Write = match &mut out {
-                Out::Temp(f) => f,
-                Out::Spill(f) => f,
-            };
+            let mut w = out.writer();
             let r = if armored {
                 let raw = read_armored(head, &mut reader)?;
                 let len = raw.len() as u64;
@@ -771,32 +871,8 @@ fn cmd_decrypt(
             Ok(())
         })();
 
-        match out {
-            Out::Temp(mut f) => {
-                f.flush()?;
-                // Never publish plaintext that failed policy. NamedTemp's
-                // destructor removes the sidecar on this and every other
-                // error path.
-                policy?;
-                if let io::Sink::File(p) = &sink {
-                    let tmp = f.into_inner().map_err(|e| anyhow!("{e}"))?;
-                    tmp.sync_all().context("syncing plaintext")?;
-                    tmp.commit(p, force)?;
-                }
-            }
-            Out::Spill(mut f) => {
-                f.flush()?;
-                let mut f = f.into_inner().map_err(|e| anyhow!("{e}"))?;
-                // The spill file is already unlinked, so failing here leaves
-                // nothing behind and emits nothing.
-                policy?;
-                io::check_cancelled()?;
-                f.rewind()?;
-                let mut stdout = io::CancelWriter::new(std::io::stdout().lock());
-                std::io::copy(&mut f, &mut stdout)?;
-                stdout.flush()?;
-            }
-        }
+        let authorized = out.authorize(policy)?;
+        authorized.publish(force)?;
         Ok(dec.bytes)
     })();
 
@@ -1309,13 +1385,23 @@ fn cmd_status(json: bool) -> Result<()> {
 
     let obj = json!({
         "kind": "status",
+        "status_schema": "anubis-status/assurance-v1",
         "version": env!("CARGO_PKG_VERSION"),
         "suite": {
             "kem": SUITE_KEM,
             "sig": SUITE_SIG,
             "aead": SUITE_AEAD,
             "kdf": SUITE_KDF,
+            // Kept for consumers of the original status schema. This means
+            // only that algorithms are specified by those publications; the
+            // explicit fields below carry the validation boundary.
             "fips": ["203", "204"],
+            "nist_standards": ["FIPS 203", "FIPS 204"],
+            "pq_security_category": 5,
+            "algorithm_profile": "portable-v3",
+            "approved_only_mode": false,
+            "fips_140_3_validated": false,
+            "fips_140_3_certificate": null,
             "pure_rust": true,
             "format": format::MAGIC,
         },
@@ -1332,6 +1418,7 @@ fn cmd_status(json: bool) -> Result<()> {
         println!("ANUBIS {}", env!("CARGO_PKG_VERSION"));
         println!("suite:       {SUITE_KEM} / {SUITE_SIG} / {SUITE_AEAD}");
         println!("format:      {}", format::MAGIC);
+        println!("assurance:   Category 5 PQ parameters; not FIPS 140-3 validated");
         println!(
             "identities:  {}",
             obj["identities"].as_array().map_or(0, Vec::len)

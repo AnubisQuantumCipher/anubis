@@ -1,0 +1,10 @@
+flowchart LR
+    U[CLI / Vault / Plugin] --> R[Replacement engine at existing boundary]
+    C[Untrusted or migrated container] --> R
+    R --> S[New candidate suite]
+    S --> G[Publication gate]
+    G --> O[Plaintext destination]
+    M[Bulk migration / re-encryption] --> R
+    E[Formal and test pipeline] --> B[Revision-bound evidence bundle]
+    B --> U
+    N[NIST standards / CAVP / CMVP] -. external validation still required .-> R
