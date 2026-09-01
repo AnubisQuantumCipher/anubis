@@ -13,7 +13,7 @@ The proposal presents the complete option set before recommending one:
 - **Option 1: Evidence-harden ANUBIS/v3 in place.** Keep the current wire suite
   and add a revision-bound claim ledger, formal checks, differential tests, and
   storage-bounded evidence retention.
-- **Option 2: Add an isolated ANUBIS/v4 approved-algorithm-candidate core.**
+- **Option 2: Add an isolated ANUBIS/v4 restricted-profile candidate core.**
   Preserve v3 compatibility, put new writes behind an explicit version, and
   build a small candidate core whose suite and proof obligations are fixed by
   that version.
@@ -26,7 +26,7 @@ not a claim that v4 already exists or that any resulting module is validated.
 
 ## Executive Recommendation
 
-I recommend **Option 2: Add an isolated ANUBIS/v4 approved-algorithm-candidate
+I recommend **Option 2: Add an isolated ANUBIS/v4 restricted-profile candidate
 core** under the current compatibility and assurance constraints. It is the only
 option that gives us a clean, immutable algorithm and state-machine boundary
 without stranding existing ciphertext. It also gives reviewers a precise noun:
@@ -242,7 +242,7 @@ Security improves through detection, not through a new cryptographic boundary.
 Kani can prove bounded Rust properties in the modeled code, differential tests
 can detect implementation divergence, and the claim checker can reject stale
 evidence. The current v3 suite and its residual composition assumptions remain.
-In particular, this option cannot truthfully become an approved-algorithm mode
+In particular, this option cannot truthfully become an externally approved mode
 merely by adding proof artifacts. The full module also remains outside CMVP
 without the external validation process.
 
@@ -282,13 +282,13 @@ flowchart LR
 | Claim ownership | Prose and code linked by review | Machine-readable ledger names suite, revision, evidence, assumptions, and non-claims | Stale or over-broad claims can fail CI | Ledger maintenance and schema review |
 | Formal checks | Harnesses exist outside starting CI | Bounded checks are reproducible CI gates | Modeled invariant regressions are detected | Longer CI and solver/toolchain maintenance |
 | Proof storage | Tool defaults and developer cleanup | Quota preflight, disposable scratch, compact retained bundle | Out-of-space runs fail closed and do not corrupt prior evidence | Runner and retention tooling |
-| Wire/runtime | v3 fixed suite | Unchanged | No new runtime attack surface | No path toward an approved-algorithm candidate suite |
+| Wire/runtime | v3 fixed suite | Unchanged | No new runtime attack surface | No path toward a restricted-profile candidate suite |
 
 The meaningful delta is epistemic: we know more exactly what v3 evidence says.
 If near-term compatibility and delivery dominate every other priority, this
 option is proportionate and should win.
 
-### Option 2: Add An Isolated ANUBIS/v4 Approved-Algorithm-Candidate Core
+### Option 2: Add An Isolated ANUBIS/v4 Restricted-Profile Candidate Core
 
 Option 2 makes the assurance boundary an architectural component. An explicit
 version dispatcher sends v3 input only to the frozen compatibility reader and
@@ -306,7 +306,7 @@ production adapters still need tests, differential vectors, and source review;
 we do not pretend a pure model proves foreign I/O or dependency internals.
 
 The initial suite target replaces v3's payload and wrap choices with current
-approved-algorithm candidates: AES-256-GCM for payload protection, an approved
+NIST-standard algorithm candidates: AES-256-GCM for payload protection, an
 AES key-wrap construction for the file key, SHA-512/HMAC/HKDF where the
 applicable NIST profiles permit them, ML-KEM-1024 for post-quantum key
 establishment, and ML-DSA-87 for signatures. The classical hybrid component is
@@ -367,20 +367,20 @@ flowchart LR
     D --> V3[Isolated v3 compatibility reader]
     D --> V4[Isolated v4 candidate core]
     V3 --> G[Typed publication gate]
-    V4 --> S[Fixed approved-algorithm-candidate suite]
+    V4 --> S[Fixed restricted-profile candidate suite]
     S --> G
     G --> O[Plaintext destination]
     E[Storage-bounded formal and test pipeline] --> B[Revision-bound evidence bundle]
     B --> L[Machine-readable claim ledger]
     L --> U
     N[NIST standards / CAVP / CMVP] --> L
-    N -. external validation still required .-> V4
+    F[Optional sponsor-funded external validation] -. official evidence only .-> L
 ```
 
 | Change | Before | After | Security consequence | Cost |
 | --- | --- | --- | --- | --- |
 | Version boundary | One v3 engine and suite | Exact dispatch to isolated v3 and v4 cores | No silent reinterpretation or downgrade between suites | Parallel-reader maintenance |
-| Candidate algorithms | v3 ChaCha20-Poly1305 suite | Fixed v4 approved-algorithm-candidate suite | Creates a tractable candidate boundary; does not create validation | New specification, dependencies, vectors, and benchmarks |
+| Candidate algorithms | v3 ChaCha20-Poly1305 suite | Fixed v4 restricted-profile candidate suite | Creates a tractable candidate boundary; does not create validation | New specification, dependencies, vectors, and benchmarks |
 | State ownership | Controls span parser, crypto, CLI, and UI | Typed core states gate attestation and publication | Invalid promotion paths become easier to exclude and prove | API migration across all surfaces |
 | Formal model | Harnesses embedded in selected modules | Pure v4 model plus refinement/differential checks | Stronger evidence for modeled transitions and geometry | Proof maintenance and model/code correspondence work |
 | Proof storage | Unbounded tool defaults are possible | Quota-enforced disposable scratch and compact evidence | Prevents assurance work from exhausting the host | Cleanup, quota, and observability tooling |
@@ -444,8 +444,10 @@ flowchart LR
     G --> O[Plaintext destination]
     M[Bulk migration / re-encryption] --> R
     E[Formal and test pipeline] --> B[Revision-bound evidence bundle]
-    B --> U
-    N[NIST standards / CAVP / CMVP] -. external validation still required .-> R
+    B --> L[Machine-readable claim ledger]
+    L --> U
+    N[NIST standards / CAVP / CMVP] --> L
+    F[Optional sponsor-funded external validation] -. official evidence only .-> L
 ```
 
 | Change | Before | After | Security consequence | Cost |

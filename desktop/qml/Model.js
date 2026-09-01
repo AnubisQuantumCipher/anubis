@@ -118,12 +118,12 @@ function fipsChips(suite) {
   for (var i = 0; i < list.length; i++) out.push("NIST " + String(list[i]))
   if (typeof s.pq_security_category === "number")
     out.push("PQ CATEGORY " + String(s.pq_security_category))
-  if (s.fips_140_3_validated === true)
-    out.push("FIPS 140-3 VALIDATED " + String(s.fips_140_3_certificate))
-  else if (s.fips_140_3_validated === false)
+  if (s.fips_140_3_validated === false)
     out.push("NOT FIPS 140-3 VALIDATED")
   else
-    out.push("FIPS 140-3 STATUS NOT STATED")
+    out.push(s.fips_140_3_validated === true
+             ? "FIPS 140-3 STATUS REFUSED"
+             : "FIPS 140-3 STATUS NOT STATED")
   return out
 }
 
@@ -648,12 +648,9 @@ function validStatusRecord(o) {
     if (typeof s.pq_security_category !== "number"
         || !isFinite(s.pq_security_category) || s.pq_security_category <= 0) return false
     if (typeof s.algorithm_profile !== "string" || s.algorithm_profile === "") return false
-    if (typeof s.approved_only_mode !== "boolean") return false
-    if (typeof s.fips_140_3_validated !== "boolean") return false
-    if (s.fips_140_3_validated) {
-      if (typeof s.fips_140_3_certificate !== "string"
-          || s.fips_140_3_certificate === "") return false
-    } else if (s.fips_140_3_certificate !== null) return false
+    if (s.approved_only_mode !== false) return false
+    if (s.fips_140_3_validated !== false) return false
+    if (s.fips_140_3_certificate !== null) return false
   }
   var c = o.counts
   if (!c || typeof c !== "object") return false

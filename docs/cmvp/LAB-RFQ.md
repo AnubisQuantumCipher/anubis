@@ -1,10 +1,17 @@
-# CST-laboratory RFQ and intake package
+# Deferred CST-laboratory RFQ reference
 
-Status: ready for vendor identity, commercial approval, and identical
-distribution to shortlisted laboratories. No lab has been contacted and no
-money has been committed.
+Status: inactive and sponsor-deferred. The owner has chosen not to purchase
+certification. This file is not approved for distribution, laboratory contact,
+contract, purchase order, invoice, or payment. It is retained only to reduce
+rework if an external sponsor funds and the owner authorizes official validation
+under [SPONSORSHIP.md](SPONSORSHIP.md).
 
-## Vendor inputs still required
+Nothing in this file blocks the current non-certified v4 engineering path. A
+future certification effort may require redesign of the released profile;
+retaining this template does not promise that the present architecture is
+acceptable to a laboratory or CMVP.
+
+## Vendor inputs required only if certification resumes
 
 Do not infer these from a GitHub account, local machine, or password manager:
 
@@ -20,7 +27,7 @@ Do not infer these from a GitHub account, local machine, or password manager:
 - whether v4 must retain a classical-plus-PQ hybrid or may use the proposed
   ML-KEM-only first profile.
 
-## Current accredited shortlist
+## Historical accredited-directory snapshot
 
 The official NVLAP directory was checked on 2026-09-01 under ITST:
 Cryptographic and Security Testing for both ACVT and Cryptographic Modules -
@@ -36,10 +43,13 @@ availability, price, or fitness.
 | AEGISOLVE | 200802-0 | Commercial; both scopes; displayed CST expiry 2026-12-31 |
 
 Re-query the [official NVLAP directory](https://www-s.nist.gov/niws/index.cfm?event=directory.search)
-before sending and before signing. Require accreditation to remain active
-through the expected Production ACVTS and submission dates.
+before any future contact and again before signing. The listed organizations,
+scopes, and dates must not be treated as current.
 
-## Identical RFQ text
+## Dormant RFQ template
+
+Do not send this text unless the owner or a future sponsor explicitly reopens
+and funds certification.
 
 Subject: RFQ — ANUBIS v4 Linux/Rust FIPS 140-3 Level 1 Full Submission
 
@@ -50,8 +60,9 @@ module.
 
 The proposed boundary is one versioned Linux shared library. The CLI, desktop
 application, Omarchy plugin, filesystem handling, and legacy v3 implementation
-are outside the boundary. The lowest-risk proposed suite uses ML-KEM-1024,
-AES-256-KW, AES-256-GCM, HMAC_DRBG/SHA2-512, ML-DSA-87, and required
+are outside the boundary. No choice has been made between the fixed-hybrid and
+ML-KEM-only candidates. Functions common to the current design baseline include
+ML-KEM-1024, AES-256-KW, AES-256-GCM, HMAC_DRBG/SHA2-512, ML-DSA-87, and required
 SHA2/SHA3/SHAKE/HMAC prerequisites. No production v4 wire format or
 cryptographic provider has been frozen; we want a written architecture
 checkpoint before implementation compatibility commitments.
@@ -79,7 +90,7 @@ Please quote and describe:
 Please separate laboratory fees from NIST cost-recovery fees and identify every
 assumption that can change price or schedule.
 
-## Attachments for the first call
+## Attachments if certification is reopened
 
 - this RFQ;
 - [program status](program-status.json);
@@ -94,21 +105,23 @@ Do not send private identities, ProtonPass exports, production ciphertext,
 customer data, or unrelated machine state. Use disposable test fixtures and
 the laboratory's approved secure source-transfer channel after an NDA.
 
-## Commercial reality
+## Historical commercial snapshot
 
 NIST's current 2026 Full Submission Security Level 1 fee table lists a
 $16,000 cost-recovery fee and a possible $3,000 extended-cost-recovery fee.
 Laboratory fees are separate and are only known after quotes. NIST review does
-not begin until its applicable payment is confirmed. This file does not
-authorize a lab contract, purchase order, invoice, or payment.
+not begin until its applicable payment is confirmed. This dated observation
+does not authorize or recommend any expenditure.
 
 Source: [NIST cost-recovery fees](https://csrc.nist.gov/projects/cryptographic-module-validation-program/nist-cost-recovery-fees)
 and [CST laboratory fees](https://csrc.nist.gov/Projects/cryptographic-module-validation-program/cst-lab-accreditation-and-fees).
 
-## Award gate
+## Conditional resumption gate
 
-Before award, compare proposals on written technical fit, accreditation
-duration, PQC staffing, entropy plan, total fee structure, remediation terms,
-schedule, source handling, and CMVP coordination ownership. Require the chosen
-lab to return a signed architecture-decision record before v4 production bytes
-or the module version are frozen.
+If certification is activated under [SPONSORSHIP.md](SPONSORSHIP.md), compare
+proposals on written technical fit, accreditation duration, PQC staffing,
+entropy plan, total fee structure, remediation terms, schedule, source handling,
+and CMVP coordination ownership. Require the chosen lab to identify required
+architecture changes in writing. The sponsor must accept the cost and
+compatibility consequences; the current project does not delay its
+non-certified profile for this dormant path.

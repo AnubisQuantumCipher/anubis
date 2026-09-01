@@ -1,23 +1,32 @@
 {
-  "schema": "anubis.cmvp-precertificate-status.v1",
+  "schema": "anubis.assurance-status.v2",
   "as_of": "2026-09-01",
-  "module": {
-    "name": "ANUBIS v4 Cryptographic Module",
+  "candidate": {
+    "name": "ANUBIS v4 Cryptographic Core",
     "version": null,
     "type": "software",
-    "target_security_level": 1,
-    "source_boundary": "crates/anubis-v4-core"
+    "source_boundary": "crates/anubis-v4-core",
+    "design_reference": "selected software-module controls drawn from FIPS 140-3 Security Level 1 requirements"
   },
-  "program": {
-    "phase": "pre-submission",
+  "engineering": {
+    "phase": "implementation",
+    "profile": "restricted-nist-standard-v4",
+    "restricted_profile_available": false,
+    "self_assessment": "partial"
+  },
+  "certification": {
+    "status": "sponsor-deferred",
     "cstl": null,
     "test_id": null,
     "cavp_certificates": [],
     "cmvp_certificate": null
   },
   "claims": {
+    "fips_140_3_compliant": false,
+    "cavp_validated": false,
     "approved_mode_available": false,
-    "fips_140_3_validated": false
+    "fips_140_3_validated": false,
+    "independently_audited": false
   },
-  "next_external_gate": "Execute a statement of work with an NVLAP-accredited CST laboratory for architecture review, ACVTS testing, and a FIPS 140-3 Full Submission."
+  "next_engineering_gate": "Freeze the v4 restricted profile and implement its production provider, cryptographic module self-tests, service and data-output gates, SSP lifecycle, deterministic test adapter, and independent vectors."
 }

@@ -1,7 +1,8 @@
 # CMVP source snapshot
 
-This is the authoritative-source inventory used for the ANUBIS validation
-readiness review. It records what was retrieved on 2026-09-01 without
+This is the authoritative-source inventory used for the ANUBIS v4 engineering
+self-assessment and deferred certification reference. It records what was
+retrieved on 2026-09-01 without
 committing large or fast-changing NIST binaries. A digest identifies the bytes
 reviewed; it does not make a document current forever and is not evidence of a
 validation.
@@ -17,9 +18,9 @@ validation.
 
 The [SP 800-140B support page](https://csrc.nist.gov/Projects/cryptographic-module-validation-program/sp-800-140-series-supplemental-information/sp800-140b)
 also identified ModVerifyApp V4.6.3 and resource files dated 2026-07-15 when
-reviewed. Those executables are not vendored. The selected CST laboratory must
-refresh the schema, template, application, and resource files immediately
-before package generation.
+reviewed. Those executables are not vendored. They are irrelevant to the active
+non-certified build. If certification resumes, the project and selected CST
+laboratory must refresh them immediately before package generation.
 
 ## Normative and program sources
 
@@ -46,16 +47,19 @@ before package generation.
 
 ## Refresh rule
 
-Before any architecture freeze, ACVTS campaign, report submission, or release
-claim, the CST laboratory and vendor must:
+Before a v4 architecture freeze or release claim, the project must:
 
 1. fetch every applicable source from its official NIST location;
 2. record the displayed revision/date and the retrieved-byte digest;
 3. compare the requirements with this repository and the exact candidate
-   module build;
+   core build;
 4. update this inventory through review; and
-5. discard downloaded working copies unless the lab evidence plan requires
-   retention.
+5. discard downloaded working copies unless the bounded evidence policy
+   requires retention.
+
+If certification is later funded, repeat this process with the selected CST
+laboratory for the complete controlled requirement set, current ACVTS campaign,
+MIS, Security Policy, and submission resources.
 
 The repository retains links, versions, digests, decisions, and compact test
 evidence. It does not retain unbounded PDF, solver, ACVTS-session, or build

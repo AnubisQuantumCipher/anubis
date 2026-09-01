@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Reject premature or internally inconsistent CMVP claims.
+"""Reject unsupported or internally inconsistent assurance claims.
 
-The current schema is intentionally pre-certificate-only. A future CMVP
-certificate must cause a reviewed schema and verifier change; flipping a JSON
-boolean can never turn this repository into a validated module.
+The current schema records a non-certified engineering program. A future CAVP
+or CMVP certificate must cause a reviewed schema and verifier change; flipping
+a JSON boolean can never turn this repository into a validated module.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any
 
 
 class StatusError(ValueError):
-    """The status document violates the pre-certificate contract."""
+    """The status document violates the non-certified assurance contract."""
 
 
 ENGINE_FALSE_CLAIMS = (
@@ -148,9 +148,27 @@ PROSE_SUFFIXES = {
     ".yml",
 }
 
-CURRENT_NEXT_EXTERNAL_GATE = (
-    "Execute a statement of work with an NVLAP-accredited CST laboratory for "
-    "architecture review, ACVTS testing, and a FIPS 140-3 Full Submission."
+SOURCE_LITERAL_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".js",
+    ".jsx",
+    ".py",
+    ".qml",
+    ".rs",
+    ".sh",
+    ".ts",
+    ".tsx",
+}
+
+CURRENT_NEXT_ENGINEERING_GATE = (
+    "Freeze the v4 restricted profile and implement its production provider, "
+    "cryptographic module self-tests, service and data-output gates, SSP "
+    "lifecycle, deterministic test adapter, and independent vectors."
 )
 
 ANUBIS_SUBJECT = (
@@ -158,76 +176,178 @@ ANUBIS_SUBJECT = (
     r"(?:\s+cryptographic\s+module)?"
 )
 
+ASSURANCE_PROGRAM = r"(?:FIPS(?:\s+140-3)?|CMVP|CAVP)"
+SOURCE_LITERAL_START = r"(?:(?:u8|[rubf]{0,2})\#*[\"'`])"
+
+SOURCE_LITERAL_JOIN = re.compile(
+    r"(?<!\\)[\"'`]\#*\s*(?:\+\s*)?"
+    r"(?:u8|[rubf]{0,2})\#*[\"'`]",
+    re.IGNORECASE,
+)
+
+SOURCE_ESCAPED_SPACE = re.compile(
+    r"\\(?:[tnrfv]|x(?:09|0[a-d]|20)|u(?:0009|000[a-d]|0020)|"
+    r"u\{0*(?:9|[a-d]|20)\}|\r?\n)",
+    re.IGNORECASE,
+)
+
+PROHIBITED_CLAIM_PREFIX = re.compile(
+    r"(?:(?:do|must|should)\s+not|never)\s+"
+    r"(?:claim|say|state|write|describe|market|label|call|present|represent)"
+    r"(?:\s+(?:that|it\s+as))?\s*[:\-]?\s*[\"'\N{LEFT DOUBLE QUOTATION MARK}"
+    r"\N{LEFT SINGLE QUOTATION MARK}]?\s*$",
+    re.IGNORECASE,
+)
+
 POSITIVE_SUBJECT_CLAIMS = (
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:is(?:\s+now)?|has\s+been)\s+"
-        r"(?:a\s+)?(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+validated\b",
+        rf"(?:a\s+)?{ASSURANCE_PROGRAM}(?:\s+module)?\s+"
+        r"(?:validated|approved)\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:is(?:\s+now)?|has\s+been)\s+"
         r"(?:certified|validated)\s+(?:under|to)\s+"
-        r"(?:FIPS(?:\s+140-3)?|CMVP)\b",
+        rf"{ASSURANCE_PROGRAM}\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:has\s+)?(?:successfully\s+)?"
         r"(?:achieved|completed|obtained|received)\s+(?:an?\s+)?"
-        r"(?:(?:FIPS(?:\s+140-3)?|CMVP)\s+)?"
+        rf"(?:{ASSURANCE_PROGRAM}\s+)?"
         r"(?:module\s+)?(?:validation|certification|certificate)\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:now\s+)?(?:has|holds)\s+"
-        r"(?:an?\s+)?(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+"
+        rf"(?:an?\s+)?{ASSURANCE_PROGRAM}(?:\s+module)?\s+"
         r"(?:certificate|certification)\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:is(?:\s+now)?|has\s+been)\s+"
-        r"(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+certified\b",
+        rf"{ASSURANCE_PROGRAM}(?:\s+module)?\s+certified\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:has\s+)?(?:successfully\s+)?passed\s+"
-        r"(?:the\s+)?(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+"
+        rf"(?:the\s+)?{ASSURANCE_PROGRAM}(?:\s+module)?\s+"
         r"(?:validation|certification)\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:is(?:\s+now)?|has\s+been)\s+"
-        r"(?:(?:FIPS(?:\s+140-3)?|CMVP)[-\s]+compliant|"
-        r"compliant\s+with\s+(?:FIPS(?:\s+140-3)?|CMVP))\b",
+        rf"(?:{ASSURANCE_PROGRAM}[-\s]+compliant|"
+        rf"compliant\s+with\s+{ASSURANCE_PROGRAM})\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+validated\s*:\s*"
+        rf"\b{ASSURANCE_PROGRAM}(?:\s+module)?\s+"
+        r"(?:validated|approved)\s*:\s*"
         rf"{ANUBIS_SUBJECT}\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s*(?::|[-\N{{EM DASH}}\N{{EN DASH}}])\s*"
-        r"(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+validated\b",
+        rf"{ASSURANCE_PROGRAM}(?:\s+module)?\s+(?:validated|approved)\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:now\s+)?has\s+(?:an?\s+)?"
-        r"(?:FIPS(?:\s+140-3)?|CMVP)(?:\s+module)?\s+"
+        rf"{ASSURANCE_PROGRAM}(?:\s+module)?\s+"
         r"(?:validation|certification)\b",
         re.IGNORECASE,
     ),
     re.compile(
         rf"\b{ANUBIS_SUBJECT}\s+(?:is|has\s+been)\s+validated\s+by\s+"
-        r"(?:the\s+)?(?:FIPS(?:\s+140-3)?|CMVP)\b",
+        rf"(?:the\s+)?{ASSURANCE_PROGRAM}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:is|was|has\s+been)\s+"
+        r"(?:independently|third[-\s]+party(?:\s+cryptographically)?)\s+audited\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:has\s+)?(?:successfully\s+)?"
+        r"(?:undergone|completed|passed|received)\s+(?:an?\s+)?"
+        r"(?:independent|third[-\s]+party)"
+        r"(?:\s+(?:cryptographic|security|source[-\s]+code))?\s+audit\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:independently\s+audited|(?:independent|third[-\s]+party)"
+        r"(?:\s+(?:cryptographic|security|source[-\s]+code))?\s+audit\s+"
+        r"(?:passed|completed))\s*:\s*"
+        rf"{ANUBIS_SUBJECT}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:is(?:\s+now)?|has\s+been)\s+"
+        r"(?:FIPS(?:\s+140-3)?[-\s]+(?:aligned|conformant)|"
+        r"validation[-\s]+ready)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:meets|conforms\s+to|complies\s+with)\s+"
+        r"FIPS(?:\s+140-3)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:is|has\s+been)\s+aligned\s+with\s+"
+        r"FIPS(?:\s+140-3)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:now\s+)?has\s+"
+        r"FIPS(?:\s+140-3)?[-\s]+alignment\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+(?:provides|has|operates\s+in|supports|offers)\s+"
+        r"(?:an?\s+)?approved[-\s]+(?:only[-\s]+)?(?:mode|operation)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{ANUBIS_SUBJECT}\s+approved[-\s]+(?:only[-\s]+)?"
+        r"(?:mode|operation)\s+(?:is\s+)?(?:available|supported|enabled)\b",
         re.IGNORECASE,
     ),
 )
 
 POSITIVE_STANDALONE_CLAIMS = (
     re.compile(
-        r"^\s*(?:status:\s*)?FIPS\s+140-3\s+validated"
+        rf"^\s*(?:status:\s*)?{ASSURANCE_PROGRAM}(?:\s+module)?\s+"
+        r"(?:validated|certified|approved)"
         r"(?:\s+cryptographic\s+module)?[.!]?\s*$",
         re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*(?:status:\s*)?independently\s+audited[.!]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*approved[-\s]+(?:only[-\s]+)?(?:mode|operation)\s*:\s*"
+        r"(?:available|supported|enabled)[.!]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+)
+
+POSITIVE_SOURCE_LITERAL_CLAIMS = (
+    re.compile(
+        rf"{SOURCE_LITERAL_START}\s*(?:status:\s*)?{ASSURANCE_PROGRAM}"
+        r"(?:\s+module)?\s+(?:validated|certified|approved|compliant)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{SOURCE_LITERAL_START}\s*(?:status:\s*)?independently\s+audited\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"{SOURCE_LITERAL_START}\s*approved[-\s]+(?:only[-\s]+)?"
+        r"(?:mode|operation)\s*:?\s*(?:is\s+)?(?:available|supported|enabled)\b",
+        re.IGNORECASE,
     ),
 )
 
@@ -262,15 +382,16 @@ def validate(data: object) -> None:
         {
             "schema",
             "as_of",
-            "module",
-            "program",
+            "candidate",
+            "engineering",
+            "certification",
             "claims",
-            "next_external_gate",
+            "next_engineering_gate",
         },
         "root",
     )
-    if root["schema"] != "anubis.cmvp-precertificate-status.v1":
-        raise StatusError("unsupported CMVP status schema")
+    if root["schema"] != "anubis.assurance-status.v2":
+        raise StatusError("unsupported assurance status schema")
     if not isinstance(root["as_of"], str) or not root["as_of"]:
         raise StatusError("as_of must be a non-empty date string")
     try:
@@ -279,48 +400,77 @@ def validate(data: object) -> None:
         raise StatusError("as_of must be an ISO calendar date") from error
     if parsed_date.isoformat() != root["as_of"]:
         raise StatusError("as_of must use canonical YYYY-MM-DD form")
-    if root["next_external_gate"] != CURRENT_NEXT_EXTERNAL_GATE:
-        raise StatusError("next_external_gate changed without a status-schema review")
+    if root["next_engineering_gate"] != CURRENT_NEXT_ENGINEERING_GATE:
+        raise StatusError("next_engineering_gate changed without a status-schema review")
 
-    module = _exact_keys(
-        root["module"],
-        {"name", "version", "type", "target_security_level", "source_boundary"},
-        "module",
+    candidate = _exact_keys(
+        root["candidate"],
+        {"name", "version", "type", "source_boundary", "design_reference"},
+        "candidate",
     )
-    if module["name"] != "ANUBIS v4 Cryptographic Module":
-        raise StatusError("module.name changed without a status-schema review")
-    if module["version"] is not None:
+    if candidate["name"] != "ANUBIS v4 Cryptographic Core":
+        raise StatusError("candidate.name changed without a status-schema review")
+    if candidate["version"] is not None:
         raise StatusError("the candidate module version is not frozen")
-    if module["type"] != "software":
-        raise StatusError("the current validation target must remain a software module")
-    if type(module["target_security_level"]) is not int or module["target_security_level"] != 1:
-        raise StatusError("the current validation target is Security Level 1")
-    if module["source_boundary"] != "crates/anubis-v4-core":
-        raise StatusError("module source boundary changed without a status-schema review")
+    if candidate["type"] != "software":
+        raise StatusError("the current candidate must remain software")
+    if candidate["source_boundary"] != "crates/anubis-v4-core":
+        raise StatusError("candidate source boundary changed without a status-schema review")
+    if candidate["design_reference"] != (
+        "selected software-module controls drawn from FIPS 140-3 Security Level 1 requirements"
+    ):
+        raise StatusError("candidate design reference changed without a status-schema review")
 
-    program = _exact_keys(
-        root["program"],
-        {"phase", "cstl", "test_id", "cavp_certificates", "cmvp_certificate"},
-        "program",
+    engineering = _exact_keys(
+        root["engineering"],
+        {"phase", "profile", "restricted_profile_available", "self_assessment"},
+        "engineering",
     )
-    if program["phase"] != "pre-submission":
-        raise StatusError("this schema records only the current pre-submission phase")
-    if program["cstl"] is not None or program["test_id"] is not None:
-        raise StatusError("pre-submission status cannot name a CSTL or test ID")
-    if program["cavp_certificates"] != []:
-        raise StatusError("pre-submission status cannot claim CAVP certificates")
-    if program["cmvp_certificate"] is not None:
+    if engineering["phase"] != "implementation":
+        raise StatusError("this schema records only the current implementation phase")
+    if engineering["profile"] != "restricted-nist-standard-v4":
+        raise StatusError("engineering profile changed without a status-schema review")
+    if engineering["restricted_profile_available"] is not False:
+        raise StatusError("the restricted v4 profile is not available")
+    if engineering["self_assessment"] != "partial":
+        raise StatusError("the current self-assessment remains partial")
+
+    certification = _exact_keys(
+        root["certification"],
+        {"status", "cstl", "test_id", "cavp_certificates", "cmvp_certificate"},
+        "certification",
+    )
+    if certification["status"] != "sponsor-deferred":
+        raise StatusError(
+            "external certification must remain sponsor-deferred until a reviewed transition"
+        )
+    if certification["cstl"] is not None or certification["test_id"] is not None:
+        raise StatusError("non-certified status cannot name a CSTL or test ID")
+    if certification["cavp_certificates"] != []:
+        raise StatusError("non-certified status cannot claim CAVP certificates")
+    if certification["cmvp_certificate"] is not None:
         raise StatusError("a CMVP certificate requires a new certificate-aware schema")
 
     claims = _exact_keys(
         root["claims"],
-        {"approved_mode_available", "fips_140_3_validated"},
+        {
+            "fips_140_3_compliant",
+            "cavp_validated",
+            "approved_mode_available",
+            "fips_140_3_validated",
+            "independently_audited",
+        },
         "claims",
     )
-    if claims["approved_mode_available"] is not False:
-        raise StatusError("the inert v4 core does not provide an approved mode")
-    if claims["fips_140_3_validated"] is not False:
-        raise StatusError("the pre-certificate schema can never claim FIPS 140-3 validation")
+    for field in (
+        "fips_140_3_compliant",
+        "cavp_validated",
+        "approved_mode_available",
+        "fips_140_3_validated",
+        "independently_audited",
+    ):
+        if claims[field] is not False:
+            raise StatusError(f"the non-certified schema requires claims.{field}=false")
 
 
 def validate_engine_claim_surface(source: str) -> None:
@@ -335,14 +485,14 @@ def validate_engine_claim_surface(source: str) -> None:
     for required in ENGINE_FALSE_CLAIMS:
         if source.count(required) != 1:
             raise StatusError(
-                f"engine pre-certificate claim must occur exactly once: {required}"
+                f"engine non-certified claim must occur exactly once: {required}"
             )
     for forbidden in (
         '"approved_only_mode": true',
         '"fips_140_3_validated": true',
     ):
         if forbidden in source:
-            raise StatusError(f"engine contains a forbidden pre-certificate claim: {forbidden}")
+            raise StatusError(f"engine contains a forbidden non-certified claim: {forbidden}")
 
 
 def _positive_claim(
@@ -357,6 +507,24 @@ def _positive_claim(
     if include_standalone:
         patterns += POSITIVE_STANDALONE_CLAIMS
     for pattern in patterns:
+        for match in pattern.finditer(normalized):
+            line_start = normalized.rfind("\n", 0, match.start()) + 1
+            prefix = normalized[line_start : match.start()]
+            if PROHIBITED_CLAIM_PREFIX.search(prefix) is not None:
+                continue
+            return match
+    return None
+
+
+def _positive_source_literal_claim(text: str) -> re.Match[str] | None:
+    normalized = html.unescape(text).replace("\N{NO-BREAK SPACE}", " ")
+    normalized = SOURCE_ESCAPED_SPACE.sub(" ", normalized)
+    while True:
+        joined = SOURCE_LITERAL_JOIN.sub("", normalized)
+        if joined == normalized:
+            break
+        normalized = joined
+    for pattern in POSITIVE_SOURCE_LITERAL_CLAIMS:
         match = pattern.search(normalized)
         if match is not None:
             return match
@@ -398,9 +566,11 @@ def validate_prose_claim_surface(repo_root: pathlib.Path) -> None:
             include_standalone=suffix in PROSE_SUFFIXES
             or relative.name in PUBLIC_TEXT_NAMES,
         )
+        if match is None and suffix in SOURCE_LITERAL_SUFFIXES:
+            match = _positive_source_literal_claim(prose)
         if match is not None:
             raise StatusError(
-                f"positive FIPS validation prose is forbidden before a certificate: "
+                f"unsupported positive assurance prose is forbidden before verified evidence: "
                 f"{relative}: {match.group(0)!r}"
             )
 
@@ -430,7 +600,7 @@ def validate_runtime_status(data: object) -> None:
     suite = _exact_keys(root["suite"], set(RUNTIME_SUITE_EXPECTED), "runtime suite")
     for field, value in RUNTIME_SUITE_EXPECTED.items():
         if suite[field] != value or type(suite[field]) is not type(value):
-            raise StatusError(f"runtime pre-certificate field differs: suite.{field}")
+            raise StatusError(f"runtime non-certified field differs: suite.{field}")
 
 
 def validate_runtime_human(text: str) -> None:
@@ -449,52 +619,65 @@ def validate_runtime_human(text: str) -> None:
 
 def self_test() -> None:
     valid: dict[str, Any] = {
-        "schema": "anubis.cmvp-precertificate-status.v1",
+        "schema": "anubis.assurance-status.v2",
         "as_of": "2026-09-01",
-        "module": {
-            "name": "ANUBIS v4 Cryptographic Module",
+        "candidate": {
+            "name": "ANUBIS v4 Cryptographic Core",
             "version": None,
             "type": "software",
-            "target_security_level": 1,
             "source_boundary": "crates/anubis-v4-core",
+            "design_reference": (
+                "selected software-module controls drawn from FIPS 140-3 "
+                "Security Level 1 requirements"
+            ),
         },
-        "program": {
-            "phase": "pre-submission",
+        "engineering": {
+            "phase": "implementation",
+            "profile": "restricted-nist-standard-v4",
+            "restricted_profile_available": False,
+            "self_assessment": "partial",
+        },
+        "certification": {
+            "status": "sponsor-deferred",
             "cstl": None,
             "test_id": None,
             "cavp_certificates": [],
             "cmvp_certificate": None,
         },
         "claims": {
+            "fips_140_3_compliant": False,
+            "cavp_validated": False,
             "approved_mode_available": False,
             "fips_140_3_validated": False,
+            "independently_audited": False,
         },
-        "next_external_gate": CURRENT_NEXT_EXTERNAL_GATE,
+        "next_engineering_gate": CURRENT_NEXT_ENGINEERING_GATE,
     }
     validate(valid)
 
     mutations = []
-    claimed = copy.deepcopy(valid)
-    claimed["claims"]["fips_140_3_validated"] = True
-    mutations.append(claimed)
-    approved = copy.deepcopy(valid)
-    approved["claims"]["approved_mode_available"] = True
-    mutations.append(approved)
+    for field in valid["claims"]:
+        claimed = copy.deepcopy(valid)
+        claimed["claims"][field] = True
+        mutations.append(claimed)
     certificate = copy.deepcopy(valid)
-    certificate["program"]["cmvp_certificate"] = "unverified"
+    certificate["certification"]["cmvp_certificate"] = "unverified"
     mutations.append(certificate)
-    wrong_level = copy.deepcopy(valid)
-    wrong_level["module"]["target_security_level"] = 4
-    mutations.append(wrong_level)
     hidden_field = copy.deepcopy(valid)
     hidden_field["claims"]["marketing_override"] = True
     mutations.append(hidden_field)
-    premature_lab = copy.deepcopy(valid)
-    premature_lab["program"]["phase"] = "module-testing"
-    mutations.append(premature_lab)
-    boolean_level = copy.deepcopy(valid)
-    boolean_level["module"]["target_security_level"] = True
-    mutations.append(boolean_level)
+    enabled_profile = copy.deepcopy(valid)
+    enabled_profile["engineering"]["restricted_profile_available"] = True
+    mutations.append(enabled_profile)
+    completed_assessment = copy.deepcopy(valid)
+    completed_assessment["engineering"]["self_assessment"] = "complete"
+    mutations.append(completed_assessment)
+    pursuing_certification = copy.deepcopy(valid)
+    pursuing_certification["certification"]["status"] = "pursued"
+    mutations.append(pursuing_certification)
+    permanently_abandoned = copy.deepcopy(valid)
+    permanently_abandoned["certification"]["status"] = "not-pursued"
+    mutations.append(permanently_abandoned)
     noncanonical_date = copy.deepcopy(valid)
     noncanonical_date["as_of"] = "20260901"
     mutations.append(noncanonical_date)
@@ -538,6 +721,28 @@ def self_test() -> None:
         "ANUBIS has CMVP validation.",
         "ANUBIS has been validated by CMVP.",
         "ANUBIS is FIPS-compliant.",
+        "ANUBIS is FIPS 140-3 aligned.",
+        "ANUBIS is FIPS conformant.",
+        "ANUBIS is validation-ready.",
+        "ANUBIS meets FIPS 140-3.",
+        "ANUBIS conforms to FIPS 140-3.",
+        "ANUBIS complies with FIPS 140-3.",
+        "ANUBIS operates in an approved-only mode.",
+        "ANUBIS is CAVP validated.",
+        "ANUBIS is CAVP approved.",
+        "Status: CAVP approved.",
+        "ANUBIS has CAVP validation.",
+        "ANUBIS holds a CAVP certificate.",
+        "CAVP validated: ANUBIS",
+        "ANUBIS has been independently audited.",
+        "ANUBIS passed an independent audit.",
+        "ANUBIS completed a third-party security audit.",
+        "Independently audited: ANUBIS",
+        "ANUBIS is aligned with FIPS 140-3.",
+        "ANUBIS has FIPS 140-3 alignment.",
+        "ANUBIS supports approved-only operation.",
+        "ANUBIS approved-only mode is available.",
+        "Approved-only mode: supported.",
         "![FIPS 140-3 validated](badge.svg)",
         "**FIPS 140-3 VALIDATED**",
     ):
@@ -547,10 +752,41 @@ def self_test() -> None:
     for prose in (
         "ANUBIS is not FIPS 140-3 validated.",
         "ANUBIS has no CMVP certificate.",
+        "ANUBIS implements selected software-module controls drawn from FIPS 140-3.",
+        "ANUBIS is a non-validated restricted cryptographic profile.",
         "Do not write: FIPS 140-3 validated.",
+        "Do not claim \N{LEFT DOUBLE QUOTATION MARK}ANUBIS is CAVP validated."
+        "\N{RIGHT DOUBLE QUOTATION MARK}",
+        "Never state that 'ANUBIS is CAVP approved.'",
+        "ANUBIS has not been independently audited.",
+        "ANUBIS has no CAVP validation or certificate.",
     ):
         if _positive_claim(prose, include_standalone=True) is not None:
             raise AssertionError("prose claim gate rejected an explicit non-claim")
+
+    for source in (
+        'const STATUS: &str = "FIPS 140-3 validated";',
+        'text: qsTr("CMVP validated")',
+        "const label = 'CAVP validated';",
+        "const label = `CAVP validated`;",
+        'text: "CMVP " + "validated"',
+        'const char *label = "CAVP " "validated";',
+        'text: "FIPS 140-3\\x20validated"',
+        'const label = "CAVP\\tvalidated";',
+        'const AUDIT: &str = r#"Independently audited"#;',
+        'text: "Approved-only mode: available"',
+    ):
+        if _positive_source_literal_claim(source) is None:
+            raise AssertionError("source claim gate missed a wrapped positive claim")
+
+    for source in (
+        'const STATUS: &str = "not FIPS 140-3 validated";',
+        'text: qsTr("FIPS 140-3 STATUS NOT STATED")',
+        "const label = 'CAVP status unavailable';",
+        'const AUDIT: &str = r#"Not independently audited"#;',
+    ):
+        if _positive_source_literal_claim(source) is not None:
+            raise AssertionError("source claim gate rejected an explicit non-claim")
 
     duplicate_claim = (
         '{"claims":{"fips_140_3_validated":true,'
@@ -649,7 +885,7 @@ def self_test() -> None:
 def main(argv: list[str]) -> int:
     if argv == ["--self-test"]:
         self_test()
-        print("CMVP status claim-gate self-test: ok")
+        print("Assurance claim-gate self-test: ok")
         return 0
     if len(argv) == 2 and argv[0] in {"--runtime-status", "--runtime-human"}:
         try:
@@ -661,9 +897,9 @@ def main(argv: list[str]) -> int:
             else:
                 validate_runtime_human(text)
         except (OSError, json.JSONDecodeError, StatusError) as error:
-            print(f"CMVP runtime status refused: {error}", file=sys.stderr)
+            print(f"Assurance runtime status refused: {error}", file=sys.stderr)
             return 1
-        print("CMVP runtime claim surface accepted")
+        print("Assurance runtime claim surface accepted")
         return 0
     if len(argv) != 1:
         print(
@@ -681,10 +917,10 @@ def main(argv: list[str]) -> int:
         repo_root = pathlib.Path(__file__).resolve().parent.parent
         validate_repository_claim_surface(repo_root)
     except (OSError, json.JSONDecodeError, StatusError) as error:
-        print(f"CMVP status refused: {error}", file=sys.stderr)
+        print(f"Assurance status refused: {error}", file=sys.stderr)
         return 1
 
-    print(f"CMVP status accepted: {path}")
+    print(f"Assurance status accepted: {path}")
     return 0
 
 

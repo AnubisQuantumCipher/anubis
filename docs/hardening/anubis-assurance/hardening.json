@@ -11,7 +11,7 @@
   },
   "assessment": {
     "outcome": "opportunities_identified",
-    "summary": "The evidence supports one cross-cutting opportunity: isolate a future v4 approved-algorithm candidate while preserving v3 and binding every assurance claim to scoped, storage-bounded machine evidence."
+    "summary": "The evidence supports one cross-cutting opportunity: isolate a future v4 restricted-profile candidate while preserving v3 and binding every assurance claim to scoped, storage-bounded machine evidence."
   },
   "constraints": {
     "profile": "balanced",
@@ -31,7 +31,7 @@
     "assumptions": [
       "No measured latency, throughput, memory, migration-volume, or proof-storage budget was supplied.",
       "The project will continue to support CLI, Vault, and Omarchy plugin surfaces.",
-      "The operator does not plan to commission a third-party audit.",
+      "The operator will not purchase external validation or audit; outside sponsorship is welcome, but no sponsor or independent-review commitment is currently recorded.",
       "Formal verification is desired for stated software and protocol properties but is not treated as a replacement for the CAVP or CMVP process."
     ]
   },
@@ -289,7 +289,7 @@
             }
           ],
           "residualRisks": [
-            "The v3 suite remains outside the proposed approved-algorithm-candidate boundary.",
+            "The v3 suite remains outside the proposed restricted-profile candidate boundary.",
             "Formal models may omit production behavior or rely on incorrect assumptions.",
             "No local evidence creates CAVP or CMVP validation."
           ],
@@ -320,7 +320,7 @@
         },
         {
           "optionId": "additive-v4-candidate",
-          "title": "Add an isolated v4 approved-algorithm-candidate core",
+          "title": "Add an isolated v4 restricted-profile candidate core",
           "kind": "structural",
           "summary": "Preserve v3 through an isolated compatibility reader while introducing a distinct v4 wire version, fixed candidate suite, typed publication state, and revision-bound formal evidence.",
           "diagramPaths": {
@@ -684,7 +684,6 @@
     "Which exact approved key-wrap and KDF profiles fit the final v4 transcript and provider boundary?",
     "What operator-configured free-space, scratch, retained-evidence, benchmark, and CI retention thresholds apply?",
     "Which formal toolchain beyond Kani is supportable for protocol and model-to-code obligations?",
-    "What observed evidence should govern v4 opt-in, default selection, and long-term v3 writer support?",
-    "Will the project ever pursue the external CAVP and CMVP process, or permanently retain candidate/non-validated language?"
+    "What observed evidence should govern v4 opt-in, default selection, and long-term v3 writer support?"
   ]
 }

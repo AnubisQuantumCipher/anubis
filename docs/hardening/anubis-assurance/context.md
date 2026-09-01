@@ -74,7 +74,7 @@ writeups.
   claim-to-evidence ledger, future changes can allow documentation, runtime
   behavior, formal harnesses, and operator-facing attestations to drift again.
 - **Proposed:** preserve v3 decryption, introduce an isolated additive v4
-  approved-algorithm-candidate core, and make every assurance claim conditional
+  restricted-profile candidate core, and make every assurance claim conditional
   on revision-bound evidence.
 
 Formal verification can establish only the modeled properties, assumptions,

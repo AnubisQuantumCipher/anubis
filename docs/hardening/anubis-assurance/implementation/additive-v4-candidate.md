@@ -1,4 +1,4 @@
-# Implementation Plan: Additive Isolated v4 Approved-Algorithm Candidate
+# Implementation Plan: Additive Isolated v4 Restricted-Profile Candidate
 
 ## Selected Design And Constraints
 
@@ -16,9 +16,10 @@ The implementation must preserve these constraints:
   force until the corresponding path is revalidated.
 - “Category 5” refers only to the NIST strength categories assigned to
   ML-KEM-1024 and ML-DSA-87. It never means a FIPS 140-3 module level.
-- “Approved-algorithm candidate” means the design targets functions and profiles
-  on the current NIST approved boundary. It does not mean CAVP-validated,
-  CMVP-validated, or approved mode.
+- “Restricted-profile candidate” means the design evaluates a fixed set of
+  NIST-standardized algorithms behind a module-owned service boundary. It does
+  not mean FIPS 140-3 compliance, CAVP validation, CMVP validation, or approved
+  mode.
 - Formal evidence states its model, assumptions, bounds, source revision, tool
   versions, status, and non-claims. It cannot substitute for CMVP's accredited
   laboratory and validation-authority process.
@@ -367,9 +368,10 @@ the last valid compact bundle.
 
 ## Open Decisions
 
-- CST-laboratory confirmation of the proposed versioned shared-library boundary.
-- CST-laboratory confirmation of the first-certificate ML-KEM-only Scenario 1
-  profile; a fixed X25519 hybrid remains a deliberate higher-scope alternative.
+- Project architecture decision and independent review of the proposed
+  versioned shared-library boundary and concurrency owner.
+- Project architecture decision between an ML-KEM-only profile and a fixed
+  X25519 plus ML-KEM hybrid that preserves the v3 hedge.
 - Exact provider, direct KEM-key use, AES-KW profile, and ACVP adapter strategy.
 - Normative AES-GCM nonce, chunking, AAD, transcript, and final-record rules.
 - Exact DRBG/entropy/ESV, module-integrity, signature, and tested-OE profiles.
@@ -381,7 +383,10 @@ the last valid compact bundle.
 - Opt-in release and default-change criteria.
 - Long-term v3 writer support policy.
 
-External CAVP/CMVP validation is now the selected outcome. The controlled
-readiness register, proposed boundary/profile, and CST-laboratory RFQ are in
-[`docs/cmvp/`](../../../cmvp/README.md). Validation language remains false
-until CMVP issues the exact certificate.
+The selected outcome is a non-validated restricted v4 profile with
+project-maintained implementation evidence. The controlled self-assessment,
+proposed boundary/profile, and dormant certification-resumption reference are
+in [`docs/cmvp/`](../../../cmvp/README.md). Compliance, approved-mode, CAVP,
+CMVP, certificate, and audit language remains false. External sponsors may fund
+a separately authorized future validation or audit workstream, but funding alone
+does not change any claim.

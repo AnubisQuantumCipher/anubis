@@ -1,114 +1,122 @@
-# Candidate module boundary
+# Candidate v4 software boundary
 
-Status: architecture candidate for CST-laboratory review. It is not a validated
-module specification or Security Policy.
+Status: project-owned architecture candidate for a non-validated restricted
+profile. This is not a CMVP Security Policy, compliance assertion, tested
+module specification, or certificate boundary.
 
 ## Boundary decision
 
-The initial validation target is one versioned Linux shared library, provisionally
-named libanubis_fips.so, built from anubis-v4-core and its explicitly inventoried
-in-boundary dependencies. Its executable code and static data form the logical
-software boundary. The exact distributed binary, integrity mechanism, module
-version, compiler, flags, dependency closure, and tested operational environment
-must be frozen with the selected CST laboratory.
+The intended core is one versioned Linux software component built from
+`anubis-v4-core` and an explicitly inventoried in-boundary dependency closure.
+A shared library remains a provisional packaging option, not a frozen promise.
+Before production cryptography lands, a project architecture decision must
+freeze the API/FFI form, executable code and static-data extent, integrity
+mechanism, core version, compiler, flags, dependency closure, concurrency
+owner, and supported operational environment.
 
 The application is an untrusted caller of this boundary. No UI state, CLI
-message, file extension, container header, dependency name, or provider string
-can assert that the module is validated.
+message, file extension, container header, dependency name, provider string, or
+local test result can assert compliance, approval, CAVP validation, or CMVP
+validation.
 
-## Inside the proposed boundary
+## Intended inside boundary
 
-- module lifecycle and latched error state;
+- one authoritative lifecycle and latched error state;
 - software integrity verification and its pre-operational gate;
-- complete cryptographic algorithm self-tests and conditional tests;
-- approved DRBG and entropy-source interface;
-- ML-KEM key generation, encapsulation, decapsulation, and required key checks;
-- ML-DSA key generation, signature generation, signature verification, and
-  required pairwise checks;
+- complete algorithm self-tests, conditional tests, and on-demand initiation;
+- a private DRBG and entropy-source interface;
+- fixed-suite ML-KEM key generation, encapsulation, decapsulation, and checks;
+- fixed-suite ML-DSA key generation, signing, verification, and pairwise checks;
 - file content-encryption-key generation and recipient key establishment;
-- approved key derivation and key wrapping selected with the laboratory;
-- AES-256-GCM payload services and module-owned IV generation;
-- exact transcript, associated-data, nonce, and chunk-state construction;
+- the project-selected NIST-standard key derivation and wrapping construction;
+- AES-GCM payload services and core-owned IV generation;
+- exact transcript, associated-data, nonce, and record-state construction;
 - SSP ownership, import/export controls, and zeroization;
-- role/service authorization;
-- approved-service status indication for every service invocation;
-- module identity, version, state, self-test, error, and zeroization status.
+- explicit role/service authorization if the frozen API requires roles;
+- a result-bound restricted-profile classification for each completed service;
+- core identity, version, state, self-test, error, and zeroization status.
 
-## Outside the proposed boundary
+## Outside boundary
 
 - ANUBIS/v3 and every v3 primitive;
-- X25519 for the initial certificate;
-- the anubis CLI, ANUBIS Vault, and Omarchy plugin;
+- the `anubis` CLI, ANUBIS Vault, and Omarchy plugin;
 - pathname handling, filesystem reads/writes, plaintext staging, and atomic
   publication;
 - ProtonPass and every external secret store;
 - container browsing, address-book labels, audit presentation, and telemetry;
-- the operating system, CPU, process loader, storage device, and physical
-  enclosure remain outside the logical software boundary; the Security Policy
-  nevertheless identifies the tested operational environment.
+- the operating system, CPU, loader, storage device, and physical enclosure.
 
-The application may pass plaintext, ciphertext, public keys, private-key seeds,
-and policy parameters through documented ports. It must not receive raw KEM
-shared secrets, DRBG internal state, intermediate key-encryption keys, or
-unwrapped file keys unless a lab-reviewed service explicitly requires that
-output.
+The application may pass plaintext, ciphertext, public keys, wrapped keys,
+signatures, private-key seeds, and explicit policy through reviewed ports. It
+must not receive raw KEM shared secrets, DRBG state, intermediate
+key-encryption keys, or unwrapped file keys. Any future exception requires a
+recorded threat analysis and a new service contract; documentation alone
+cannot override the code boundary.
 
 ## Interface classes
 
 | Logical interface | Candidate API material |
 | --- | --- |
 | Data input | plaintext, ciphertext, public keys, wrapped keys, signatures |
-| Data output | ciphertext, authenticated plaintext, public keys, wrapped keys, signatures, verification verdicts |
-| Control input | exact service selection, fixed suite, role, sizes, final-record flag, external policy |
-| Status output | module state, operation result, approved-service indicator, self-test result, zeroization result, exact module identity |
-| Power input | process loading and execution supplied by the tested platform |
+| Data output | owned ciphertext, fully authenticated plaintext records, public keys, wrapped keys, signatures, verification verdicts |
+| Control input | exact service selection, fixed suite, role/policy, sizes, terminal-record flag |
+| Status output | core state, operation result, restricted-profile classification, self-test result, zeroization result, exact identity |
+| Execution input | process loading and execution supplied by the supported platform |
 
-Data output must be inhibited during pre-operational testing and in the latched
-error state. The outer application must separately preserve its existing rule
-that unauthenticated plaintext is never published.
+Data output must be inhibited during pre-operational testing and after a
+latched error or terminal zeroization. A decryption service must stage its owned
+output until authentication completes. The outer application must separately
+preserve its stricter whole-file rule: publish nothing until all records, the
+terminal condition, signature disposition, and caller policy pass.
 
-## Roles and services
+## Services and restrictions
 
-The candidate uses a User role for approved cryptographic services and a Crypto
-Officer role for installation, integrity/self-test invocation, status, and
-zeroization operations. The exact role-selection and authentication treatment
-is not frozen; the CST laboratory must reconcile it with the Security Level 1
-requirements and the final API.
+There is no production service or role model yet. The frozen design must define
+administrative status, initialization, on-demand testing, and zeroization
+separately from cryptographic services. It must not expose a generic algorithm
+selector, suite negotiation, fallback provider, raw primitive API, caller
+supplied GCM IV, raw DRBG output, or raw KEM shared-secret output.
 
-There will be no generic algorithm-selection API, no suite negotiation, no
-fallback provider, no standalone raw primitive API, and no non-approved cipher
-service inside the initial boundary.
+The core, never a provider or caller, owns service classification. The current
+type can report only `NotValidated` with no CMVP certificate. The term
+`RestrictedProfileCompleted` records a successful local code path; it does not
+mean approved operation or external validation.
 
 ## Operational environment
 
-Omarchy is based on rolling Arch Linux, so a label such as “Omarchy” is not a
-reproducible tested environment. The first certificate should name one narrow,
-frozen Linux operational environment and hardware platform that the laboratory
-can reproduce. Additional architectures and distributions are later
-validation-maintenance decisions, not assumptions attached to the first
-certificate.
-
-Before freeze, record:
+Generic Omarchy or rolling Arch Linux is not a reproducible supported
+environment. Before v4 release, freeze one narrow build and runtime profile and
+record:
 
 - kernel and operating-system identity;
 - CPU architecture and processor family;
-- presence or absence of processor algorithm acceleration;
+- enabled processor algorithm features;
 - dynamic loader and C runtime;
 - Rust compiler, linker, build flags, and dependency lockfile;
-- exact module binary digest and integrity-test coverage;
+- exact core artifact digest and integrity-test coverage;
 - installation path, ownership, and permissions;
-- whether the module is delivered dynamically or statically linked.
+- dynamic versus static delivery and the concurrency/singleton model.
+
+That record is reproducibility evidence only. It does not create certificate
+coverage.
 
 ## Current code checkpoint
 
 The isolated crate has no production suite value or cryptographic operation.
-Its provider owner now models PreOperational, SelfTesting, Operational, and
-latched Error states. An opaque operational capability exists only after the
-exact suite's self-test hook succeeds; failed startup or on-demand tests block
-that capability. Zeroization has an explicit success/failure result and cannot
-recover a latched error state.
+The lifecycle owner now models `PreOperational`, `SelfTesting`, `Operational`,
+latched `Error`, and terminal `Zeroized` states. It drives an ordered integrity
+primitive, module-integrity, and remaining-algorithm self-test sequence. Any
+self-test or fatal-service failure latches the error state before best-effort
+provider cleanup. Drop also attempts idempotent cleanup.
 
-This is implementation scaffolding only. It does not yet provide the integrity
-test, algorithm self-tests, data-output gate, service indicator, SSP
-zeroization implementation, CAVP evidence, or CMVP evidence required by the
-final module.
+An opaque operational capability exists only after the exact suite's self-test
+sequence succeeds, rechecks state before completing output, and remains unable
+to release a result after a fatal transition. Completed output is inseparable
+from module-owned service metadata hard-coded as not CMVP validated. Successful
+explicit zeroization permanently revokes operation.
+
+This remains scaffolding. Fake hooks are not real integrity or algorithm tests;
+provider zeroization status is not proof that every compiler, allocator, OS,
+storage, or physical-memory copy was erased; panic/abort behavior and
+shared-library concurrency are not solved; and generic staged test output does
+not prove future concrete output types contain no SSPs.
