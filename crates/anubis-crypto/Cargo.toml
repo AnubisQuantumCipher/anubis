@@ -11,7 +11,9 @@ repository.workspace = true
 anubis-v4-core = { path = "../anubis-v4-core" }
 base64 = "0.23.1"
 bech32 = "0.12.0"
-chacha20poly1305 = "0.11.0"
+# `zeroize` makes the cipher wipe its key schedule on drop; without it the
+# wrap and payload keys outlive the `Zeroizing` wrappers that own them.
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"

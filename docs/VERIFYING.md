@@ -98,6 +98,12 @@ ANUBIS_EXPECT_FP=A4DB-4D6C-B58D-2003-C7E6 docs/verify/openssl-verify.sh containe
 Exit `0` verified, `1` present-and-failed or pin mismatch, `2` unsigned or
 malformed.
 
+The Python verifier uses a finer code set, documented in its header: `0`
+valid, `1` invalid or pin mismatch, `2` unsigned, `3` malformed container (or a
+malformed `--signer` pin), `4` environment problem. In both tools, and in
+`anubis verify`, `--signer`/`ANUBIS_EXPECT_FP` implies that a signature is
+required: an unsigned container under a pin is a failure, not "absent".
+
 The three steps that are not obvious:
 
 **Extract without a parser.** The MAC line is the first line matching
@@ -107,11 +113,19 @@ base64 characters after the literal `-> mldsa87 `. Because 2592 is divisible
 by 3, the unpadded base64 needs no `=` repair.
 
 That deliberately small shell recipe is an independent signature-transcript
-check, not a complete ANUBIS grammar validator. A valid signature over
-non-canonical or otherwise malformed header bytes can still be cryptographically
-valid. Use the independent Python parser or `anubis verify` when structural
-validity is also required; neither can check the keyed header MAC without a
-recipient identity.
+check, not a complete ANUBIS grammar validator. It does refuse the structural
+cases section 4.3 singles out for keyless verifiers -- a second `-> mldsa87`
+stanza, a signature stanza before any recipient block, and a header with no
+recipient block -- because a header advertising two signers must not be
+resolved to whichever stanza a scan found first. Beyond that, a valid
+signature over non-canonical or otherwise malformed header bytes can still be
+cryptographically valid, and the shell recipe will report it as such. Use the
+independent Python parser or `anubis verify` when structural validity is also
+required; neither can check the keyed header MAC without a recipient identity.
+The shell recipe compares the pinned fingerprint with an ordinary string test,
+not in constant time; the fingerprint is a hash of a public key, so nothing
+secret is exposed, but it is a deviation from the MUST in section 11.4 that a
+conforming implementation would not take.
 
 **Wrap the key.** OpenSSL wants a DER `SubjectPublicKeyInfo`, with OID
 `2.16.840.1.101.3.4.3.19` and the parameters field **absent** (not NULL). The

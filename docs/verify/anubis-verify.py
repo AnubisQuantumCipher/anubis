@@ -24,8 +24,11 @@ Exit codes:
   0  signature present and VALID
   1  signature present and INVALID (FAIL)
   2  no signature present (ABSENT)
-  3  malformed container / spec violation
+  3  malformed container / spec violation, or a malformed --signer fingerprint
   4  environment problem (openssl missing or unusable)
+
+--signer implies --require-signature, as it does for `anubis decrypt` and
+`anubis verify`: an unsigned container under a signer pin exits 1, not 2.
 """
 
 from __future__ import annotations
@@ -259,7 +262,9 @@ def read_line(data: bytes, pos: int) -> Line:
     bounded at MAX_HEADER_LINE so a file with no 0x0A cannot force an unbounded
     read before any key material is involved.
     """
-    limit = min(len(data), pos + MAX_HEADER_LINE + 1)
+    # A line is at most MAX_HEADER_LINE bytes including its LF, matching the
+    # reference reader, which reads at most that many bytes per line.
+    limit = min(len(data), pos + MAX_HEADER_LINE)
     nl = data.find(b"\n", pos, limit)
     if nl < 0:
         if limit == len(data):
@@ -851,6 +856,17 @@ def main(argv: list[str]) -> int:
     global SIG_CONTEXT
     if a.context is not None:
         SIG_CONTEXT = a.context.encode()
+
+    if a.signer is not None:
+        # The pin is operator input: reject a malformed one before the file is
+        # touched, so it is never reported as a malformed container after a
+        # successful signature check. A pin also implies a signature requirement.
+        try:
+            fp_parse(a.signer)
+        except Malformed as exc:
+            print(f"USAGE: --signer {terminal_safe(str(exc))}", file=sys.stderr)
+            return 3
+        a.require_signature = True
 
     try:
         r = analyse(a.file, a.openssl, a.signer)

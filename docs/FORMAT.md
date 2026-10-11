@@ -423,9 +423,10 @@ header_mac_key = HKDF-SHA512(salt = "", ikm = file_key, info = "header",  L = 64
 ```
 
 Domain separation by `info` is what allows one 32-byte secret to serve both
-purposes. `payload_key` is a ChaCha20-Poly1305 key; `header_mac_key` is an
-HMAC-SHA-512 key at the full 64-byte block-aligned length, so HMAC uses it
-directly without pre-hashing.
+purposes. `payload_key` is a ChaCha20-Poly1305 key; `header_mac_key` is a
+64-byte HMAC-SHA-512 key. That is the hash output length and is below the
+128-byte SHA-512 block size, so HMAC zero-pads it and uses it directly
+without pre-hashing.
 
 ---
 
@@ -545,7 +546,10 @@ and the final chunk, at index `n-1`, uses that index in bytes 0..10 followed by
 
 The counter MUST NOT wrap. Its ceiling, `2^88 - 1`, bounds a file at
 `2^88 * 65536` bytes, far beyond any reachable size; an implementation MUST
-nonetheless treat counter overflow as a fatal error rather than wrapping.
+nonetheless treat counter overflow as a fatal error rather than wrapping. The
+reference implementation carries the counter in a 64-bit integer and refuses
+at `2^56` chunks (`2^72` payload bytes), a stricter and equally unreachable
+ceiling; it never emits a chunk whose counter the format could not encode.
 
 Note that the wrapping nonce of section 6.2 is the all-zero nonce, which is
 also chunk 0's non-final nonce. There is no collision risk: the keys are
@@ -1491,7 +1495,8 @@ construction. Anyone can read it.
 
 **The recipient count is visible.** It is exactly the number of recipient
 blocks, trivially computable from the header as
-`(header_size - 116) / 2228`, or `(header_size - 9755) / 2228` when signed.
+`(header_size - 116) / 2228`, or `(header_size - 3584) / 2228` when signed
+(section 12.1).
 There is no padding and no dummy-recipient mechanism. If the number of
 parties addressed is itself sensitive, this format leaks it.
 

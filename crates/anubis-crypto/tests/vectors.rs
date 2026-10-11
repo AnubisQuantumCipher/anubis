@@ -338,3 +338,70 @@ fn oversized_header_lines_are_refused() {
     let err = format::inspect(&mut &hostile[..], hostile.len() as u64).unwrap_err();
     assert!(err.to_string().contains("exceeds"), "got: {err}");
 }
+
+#[test]
+fn key_strings_have_the_exact_specified_character_counts() {
+    // FORMAT.md 11.2 and 11.3: a recipient is exactly 2573 characters and an
+    // identity exactly 230. The earlier bound (< 1023) only placed the
+    // identity inside the bech32 guarantee range; the spec states the count.
+    let id = Identity::generate().unwrap();
+    assert_eq!(id.encode().unwrap().len(), 230);
+    assert_eq!(id.to_recipient().unwrap().encode().unwrap().len(), 2573);
+}
+
+#[test]
+fn container_sizes_match_the_byte_budget_exactly() {
+    // FORMAT.md 13 vectors 1, 2 and 17, and the section 12 byte budget, as
+    // absolute figures rather than relative identities.
+    let id = Identity::generate().unwrap();
+    let r = id.to_recipient().unwrap();
+
+    let empty = seal(b"", std::slice::from_ref(&r), None);
+    assert_eq!(
+        empty.len(),
+        2360,
+        "empty plaintext, one recipient, unsigned"
+    );
+    let info = format::inspect(&mut &empty[..], empty.len() as u64).unwrap();
+    assert_eq!(info.header_bytes, 2344);
+    assert_eq!(info.payload_bytes, 16);
+    assert_eq!(info.chunks, 1);
+
+    let one = seal(b"x", std::slice::from_ref(&r), None);
+    assert_eq!(one.len(), 2361, "one byte, one recipient, unsigned");
+
+    let signed = seal(&[0x5a; 21], std::slice::from_ref(&r), Some(&id));
+    assert_eq!(signed.len(), 10476, "21 bytes, one recipient, signed");
+    let info = format::inspect(&mut &signed[..], signed.len() as u64).unwrap();
+    assert_eq!(info.header_bytes, 5812);
+    assert_eq!(info.payload_bytes, 37);
+    assert_eq!(
+        info.header_bytes + info.payload_bytes + format::SIG_LEN as u64,
+        signed.len() as u64
+    );
+}
+
+#[test]
+fn identity_expansion_is_deterministic_across_loads() {
+    // FORMAT.md 13 vector 13: the same identity string must expand to the
+    // same recipient, verifying key and fingerprints on every load.
+    let id = Identity::generate().unwrap();
+    let encoded = id.encode().unwrap();
+    let first = Identity::decode(&encoded).unwrap();
+    let second = Identity::decode(&encoded).unwrap();
+
+    let r1 = first.to_recipient().unwrap();
+    let r2 = second.to_recipient().unwrap();
+    assert_eq!(r1.encode().unwrap(), r2.encode().unwrap());
+    assert_eq!(r1.fingerprint(), r2.fingerprint());
+    assert_eq!(
+        r1.encode().unwrap(),
+        id.to_recipient().unwrap().encode().unwrap()
+    );
+
+    let vk1 = first.verifying_key().encode();
+    let vk2 = second.verifying_key().encode();
+    assert_eq!(vk1.as_slice(), vk2.as_slice());
+    assert_eq!(vk1.as_slice(), id.verifying_key().encode().as_slice());
+    assert_eq!(fingerprint(vk1.as_slice()), fingerprint(vk2.as_slice()));
+}
