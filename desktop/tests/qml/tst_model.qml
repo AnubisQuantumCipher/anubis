@@ -181,6 +181,36 @@ TestCase {
     verify(!Model.validStatusRecord(legacy))
   }
 
+  function test_legacySuiteTextCannotCarryAValidationClaim() {
+    var legacy = completeStatus()
+    delete legacy.status_schema
+    delete legacy.suite.nist_standards
+    delete legacy.suite.pq_security_category
+    delete legacy.suite.algorithm_profile
+    delete legacy.suite.approved_only_mode
+    delete legacy.suite.fips_140_3_validated
+    delete legacy.suite.fips_140_3_certificate
+    verify(Model.validStatusRecord(legacy))
+    verify(!/validated|certified|compliant/i.test(Model.assuranceLine(legacy)))
+
+    var claims = ["X25519+ML-KEM-1024 (FIPS 140-3 validated)",
+                  "ML-DSA-87 CMVP #4999", "ChaCha20-Poly1305 certified",
+                  "HKDF-SHA512 compliant", "anubis-encryption.org/v3 cavp"]
+    var fields = ["kem", "sig", "aead", "kdf", "format"]
+    for (var i = 0; i < fields.length; i++) {
+      var hostile = completeStatus()
+      delete hostile.status_schema
+      delete hostile.suite.nist_standards
+      delete hostile.suite.pq_security_category
+      delete hostile.suite.algorithm_profile
+      delete hostile.suite.approved_only_mode
+      delete hostile.suite.fips_140_3_validated
+      delete hostile.suite.fips_140_3_certificate
+      hostile.suite[fields[i]] = claims[i]
+      verify(!Model.validStatusRecord(hostile), fields[i])
+    }
+  }
+
   function test_contentIdIsExactLowercaseSha512Hex() {
     var valid = repeated("a", 128)
     compare(Model.contentId({ content_id: valid }), valid)

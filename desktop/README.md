@@ -353,7 +353,9 @@ that exists and cannot be decrypted.
 - The assurance fields use a versioned status schema. A pre-assurance engine
   remains usable during a non-atomic upgrade, but its validation chip reads
   `FIPS 140-3 STATUS NOT STATED`; partial or unknown assurance schemas are
-  rejected. Any changed schema-v1 algorithm, standard, category, profile,
+  rejected, and a legacy suite string that carries a validation claim token
+  (`fips`, `cmvp`, `cavp`, `validated`, `certified`, `certificate`,
+  `compliant`) is rejected rather than rendered on the assurance line. Any changed schema-v1 algorithm, standard, category, profile,
   approved-mode, validation, or certificate field is rejected before display.
   The defensive formatter labels an assurance-bearing tuple it does not
   recognize `FIPS 140-3 STATUS REFUSED`; positive display code requires a

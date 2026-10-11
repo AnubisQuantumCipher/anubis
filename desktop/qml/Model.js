@@ -784,6 +784,14 @@ function validStatusRecord(o) {
     // rendered as NOT STATED. Mixed/partial schemas fail closed.
     for (var a = 0; a < assuranceNames.length; a++)
       if (s[assuranceNames[a]] !== undefined) return false
+    // A pre-assurance engine states its suite as free text, and that text
+    // reaches the pinned assurance line verbatim. Refuse the same claim
+    // tokens the version field refuses, so a legacy suite string can never
+    // carry a validation claim onto a surface whose chips say NOT STATED.
+    var suiteText = [s.kem, s.sig, s.aead, s.kdf, s.format]
+    for (var t = 0; t < suiteText.length; t++)
+      if (/(?:fips|cmvp|cavp|validated|certified|certificate|compliant)/i
+            .test(suiteText[t])) return false
   } else {
     if (!exactObjectKeys(o, ["kind", "status_schema", "version", "generated",
                              "identities", "recipients", "recent", "counts",
