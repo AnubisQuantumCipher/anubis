@@ -141,4 +141,25 @@ TestCase {
     status.suite.approved_only_mode = false
     verify(!PluginModel.validStatusRecord(status))
   }
+
+  function test_legacySuiteTextCannotCarryAValidationClaim() {
+    var fields = ["kem", "sig", "aead", "kdf", "format"]
+    for (var i = 0; i < fields.length; i++) {
+      var status = completeStatus()
+      delete status.status_schema
+      delete status.suite.nist_standards
+      delete status.suite.pq_security_category
+      delete status.suite.algorithm_profile
+      delete status.suite.approved_only_mode
+      delete status.suite.fips_140_3_validated
+      delete status.suite.fips_140_3_certificate
+      verify(PluginModel.validStatusRecord(status))
+      status.suite[fields[i]] = status.suite[fields[i]] + " (FIPS 140-3 validated)"
+      verify(!PluginModel.validStatusRecord(status), fields[i])
+      // Transport acceptance is where a refused record is dropped; the
+      // panel then sees no status and an error, never the hostile record.
+      verify(!PluginModel.statusResponseAccepted(status, 0, "", true, 1))
+      compare(PluginModel.panelState(false, null, "status refused"), "error")
+    }
+  }
 }
