@@ -170,6 +170,7 @@ jobs:
           python docs/verify/anubis-verify.py --selftest
           scripts/test-independent-verifier-bounds.sh
           scripts/test-independent-verifier-consistency.sh sealed.anubis tampered.anubis
+          scripts/test-independent-verifier-structure.sh sealed.anubis
           python docs/verify/anubis-verify.py sealed.anubis
           if sh docs/verify/openssl-verify.sh tampered.anubis 2>/dev/null; then
             echo "OpenSSL verifier accepted a tampered container"; exit 1

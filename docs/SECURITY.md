@@ -175,6 +175,31 @@ specifics are:
   matching request acknowledgement, and a launch lock that serializes stale
   socket removal with listen. If that boundary is unavailable, forwarding is
   disabled rather than falling back to a public predictable socket.
+- **The shell verifier reports what it refuses, and refuses what section 4.3
+  forbids.** `docs/verify/openssl-verify.sh` opened its input with
+  `exec 3< "$FILE" 2>/dev/null`, which redirects the shell's own standard
+  error permanently, so every diagnostic it tried to print was discarded and a
+  missing input exited 1 through a fatal redirection. Its first-match scan also
+  verified headers carrying two `-> mldsa87` stanzas, a signature stanza before
+  any recipient block, or no recipient block, reporting whichever key the scan
+  found first. Both are closed, and
+  `scripts/test-independent-verifier-structure.sh` locks the refusals.
+- **The Python verifier's `--signer` implies `--require-signature`,** as it
+  does for `anubis verify` and `anubis decrypt`; an unsigned container under a
+  pin previously exited as "absent" rather than as a failure. A malformed pin
+  is rejected before the file is read, and a header line is bounded at 8192
+  bytes including its line feed, matching the reference reader.
+- **Secret material is wiped on more paths.** The AEAD is built with its
+  `zeroize` feature so the cipher's key schedule is cleared on drop; file, MAC
+  and payload keys are held in wiping wrappers on every exit path of encrypt
+  and decrypt, trial wrap keys are wiped at the decapsulation boundary, and the
+  CLI wipes identity file text and keygen strings. The `hkdf` and `hmac`
+  crates still do not clear their internal key state; see section 3.2.
+- **Header bytes that are not UTF-8 are a malformed header,** not an I/O
+  error, so a hostile file is never reported as a broken disk.
+- **`FORMAT.md` 14.2 gave the wrong recipient-count formula for signed
+  headers.** The subtrahend was a stale 9755 from a draft in which the
+  signature was a base64 header line; it is 3584.
 
 **Status of the primitive crates.** Several of the pure-Rust post-quantum
 implementations ANUBIS depends on carry pre-1.0 version numbers and their own
@@ -382,7 +407,11 @@ Out of scope means ANUBIS offers no defence, not that the risk is unimportant.
 
 - **Local code execution or memory access** on a machine while an identity is
   loaded. Zeroization reduces the window; it does not close it. Swap, core
-  dumps, hibernation images, and debuggers can all capture key material.
+  dumps, hibernation images, and debuggers can all capture key material. Two
+  gaps are known and not closable from this crate: the `hkdf` and `hmac`
+  crates do not clear the extracted pseudorandom key or HMAC state they hold,
+  and functions that return key arrays by value leave unscrubbed copies on the
+  stack.
 - **Filesystem read access** to `~/.config/anubis/identities/`. Identity files
   are protected by mode `0600` in a `0700` directory and nothing else. There is
   no passphrase. An adversary who reads the file has full decrypt and sign
@@ -740,7 +769,8 @@ on two incompatible formats. `FORMAT.md` section 15 documents this.
   ML-DSA-87 key signed the file, not who. Use `--require-signature`, or
   `--signer` with a fingerprint confirmed out of band, or do not rely on
   signatures at all.
-- An adversarial review closed real defects in the header MAC, header
-  canonicalisation, parser bounds, armor bounds, and secret file creation.
-  Section 1 lists each one and what it allowed.
+- Adversarial reviews closed real defects in the header MAC, header
+  canonicalisation, parser bounds, armor bounds, secret file creation, the
+  independent verifiers, and zeroization coverage. Section 1 lists each one
+  and what it allowed.
 - Report vulnerabilities privately via GitHub Security Advisories.
