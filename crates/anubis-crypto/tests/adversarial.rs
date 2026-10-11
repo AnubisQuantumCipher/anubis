@@ -1306,14 +1306,19 @@ fn invalid_utf8_in_the_header_errors_without_panicking() {
     let mut file = format!("{}\n-> ", format::MAGIC).into_bytes();
     file.extend_from_slice(&[0x80, 0xFF, 0xFE, b'\n']);
     file.extend_from_slice(format!("--- {}\n", b64_zeros(64)).as_bytes());
+    // Not UTF-8 means not a header line: a malformed header, not an I/O
+    // failure, so a hostile file is never reported as a broken disk.
     let err = must_refuse(&file, &id, "invalid utf-8");
-    assert!(matches!(err, Error::Io(_)), "invalid utf-8: {err}");
+    assert!(matches!(err, Error::Header(_)), "invalid utf-8: {err}");
 
     // Invalid UTF-8 in the magic line itself.
     let mut file = vec![0xC3, 0x28, b'\n'];
     file.extend_from_slice(format!("--- {}\n", b64_zeros(64)).as_bytes());
     let err = must_refuse(&file, &id, "invalid utf-8 magic");
-    assert!(matches!(err, Error::Io(_)), "invalid utf-8 magic: {err}");
+    assert!(
+        matches!(err, Error::Header(_)),
+        "invalid utf-8 magic: {err}"
+    );
 }
 
 #[test]
@@ -2835,4 +2840,162 @@ fn rustcrypto_expanded_secret_types_zeroize_on_drop() {
     assert_zeroize_on_drop::<ml_kem::DecapsulationKey1024>();
     assert_zeroize_on_drop::<ml_dsa::SigningKey<ml_dsa::MlDsa87>>();
     assert_zeroize_on_drop::<ml_dsa::ExpandedSigningKey<ml_dsa::MlDsa87>>();
+}
+
+// ---------------------------------------------------------------------------
+// FORMAT.md section 13 vectors that previously had no direct test
+// ---------------------------------------------------------------------------
+
+/// Vector 8: removing one recipient block from a two-recipient file must be
+/// caught by the header MAC for the recipient that remains, and the removed
+/// recipient must simply find no stanza.
+#[test]
+fn removing_a_recipient_block_breaks_the_header_mac_for_the_remaining_one() {
+    let a = Identity::generate().unwrap();
+    let b = Identity::generate().unwrap();
+    let sealed = seal(
+        b"two recipients",
+        &[a.to_recipient().unwrap(), b.to_recipient().unwrap()],
+        None,
+    );
+
+    // Lines: 0 magic, 1-2 block A, 3-4 block B, 5 MAC. Drop block A.
+    let stripped = rewrite_header_lines(&sealed, |lines| {
+        assert_eq!(lines.len(), 6);
+        lines.drain(1..3);
+    });
+    let parsed = Header::parse(&mut &stripped[..]).expect("stripped header still parses");
+    assert_eq!(parsed.stanzas.len(), 1);
+
+    let err = must_refuse(&stripped, &b, "recipient strip");
+    assert!(
+        matches!(&err, Error::Integrity(m) if m.contains("header authentication failed")),
+        "recipient strip: expected a header MAC failure, got {err}"
+    );
+
+    let (res, out) = open_raw(&stripped, std::slice::from_ref(&a));
+    assert!(
+        matches!(res, Err(Error::NoMatch)),
+        "the removed recipient must see no matching stanza"
+    );
+    assert!(out.is_empty());
+}
+
+/// Vector 7, first half: removing only the `-> mldsa87` line while leaving
+/// the trailer in place must fail header authentication rather than be read
+/// as an unsigned file whose payload happens to carry 4627 extra bytes.
+#[test]
+fn stripping_only_the_signature_stanza_is_rejected() {
+    let id = Identity::generate().unwrap();
+    let sealed = seal(b"stanza only", &[id.to_recipient().unwrap()], Some(&id));
+    let sig_prefix = format!("-> {} ", format::STANZA_SIG);
+    let mut removed = 0usize;
+    let stripped = rewrite_header_lines(&sealed, |lines| {
+        let before = lines.len();
+        lines.retain(|l| !l.starts_with(&sig_prefix));
+        removed = before - lines.len();
+    });
+    assert_eq!(removed, 1);
+
+    let err = must_refuse(&stripped, &id, "stanza-only strip");
+    assert!(
+        matches!(&err, Error::Integrity(m) if m.contains("header authentication failed")),
+        "stanza-only strip: expected a header MAC failure, got {err}"
+    );
+}
+
+/// Vector 11: `b64` is defined unpadded, so a `=` appended to any header
+/// field is a parse error, reached before any key is involved.
+#[test]
+fn padded_base64_in_any_header_field_is_rejected() {
+    let id = Identity::generate().unwrap();
+    let sealed = seal(b"padding", &[id.to_recipient().unwrap()], Some(&id));
+    // Lines: 0 magic, 1 recipient stanza (epk at word 2, ct at word 3),
+    // 2 wrapped key (word 0), 3 mldsa87 stanza (vk at word 2), 4 MAC (word 1).
+    for (line, word) in [(1usize, 2usize), (1, 3), (2, 0), (3, 2), (4, 1)] {
+        let padded = rewrite_header_lines(&sealed, |lines| {
+            let mut words: Vec<String> = lines[line].split(' ').map(str::to_string).collect();
+            words[word].push('=');
+            lines[line] = words.join(" ");
+        });
+        let err = must_refuse(&padded, &id, "padded field");
+        assert!(
+            matches!(err, Error::Header(_)),
+            "line {line} word {word}: expected a malformed-header error, got {err}"
+        );
+    }
+}
+
+/// Vector 21: the ML-DSA context string is actually passed through. The
+/// trailer verifies over `S` under "anubis-v2-file" and fails under an empty
+/// or renamed context, and fails when the raw bytes are used instead of `S`.
+#[test]
+fn signature_context_string_is_load_bearing() {
+    use hybrid_array::Array;
+    use ml_dsa::{MlDsa87, Signature, VerifyingKey};
+
+    let id = Identity::generate().unwrap();
+    let sealed = seal(b"context", &[id.to_recipient().unwrap()], Some(&id));
+    let split = sealed.len() - SIG_LEN;
+    let digest = Sha512::digest(&sealed[..split]);
+
+    let parsed = Header::parse(&mut &sealed[..]).unwrap();
+    let vk_bytes = parsed.verifying_key.expect("signed container");
+    let vk_arr = Array::try_from(vk_bytes.as_slice()).unwrap();
+    let vk = VerifyingKey::<MlDsa87>::decode(&vk_arr);
+    let sig_arr = Array::try_from(&sealed[split..]).unwrap();
+    let sig = Signature::<MlDsa87>::decode(&sig_arr).expect("trailer decodes");
+
+    assert!(vk.verify_with_context(&digest, format::SIG_CONTEXT, &sig));
+    assert!(
+        !vk.verify_with_context(&digest, b"", &sig),
+        "the signature verified under an empty context"
+    );
+    assert!(
+        !vk.verify_with_context(&digest, b"anubis-v3-file", &sig),
+        "the signature verified under a renamed context"
+    );
+    assert!(
+        !vk.verify_with_context(&sealed[..split], format::SIG_CONTEXT, &sig),
+        "the signature verified over the raw bytes instead of their digest"
+    );
+}
+
+/// Vectors 9 and 18: corruption is attributed to the right region. The first
+/// payload byte is reported as chunk 0 failing, the last chunk of a
+/// multi-chunk file as that chunk failing, and the trailer as a signature
+/// failure. The safe API releases nothing in any of the three cases.
+#[test]
+fn payload_corruption_is_attributed_to_the_right_chunk() {
+    let id = Identity::generate().unwrap();
+    let r = id.to_recipient().unwrap();
+    let sealed = seal(
+        &pseudo(2 * CHUNK + 77, 0x31),
+        std::slice::from_ref(&r),
+        Some(&id),
+    );
+    let hlen = header_len_of(&sealed);
+
+    let mut first = sealed.clone();
+    first[hlen] ^= 1;
+    let err = must_refuse(&first, &id, "first payload byte");
+    assert!(
+        matches!(&err, Error::Integrity(m) if m.contains("chunk 0 failed")),
+        "first payload byte: {err}"
+    );
+
+    let mut last = sealed.clone();
+    let idx = sealed.len() - SIG_LEN - 1;
+    last[idx] ^= 1;
+    let err = must_refuse(&last, &id, "last chunk byte");
+    assert!(
+        matches!(&err, Error::Integrity(m) if m.contains("chunk 2 failed")),
+        "last chunk byte: {err}"
+    );
+
+    let mut trailer = sealed.clone();
+    let idx = sealed.len() - 1;
+    trailer[idx] ^= 1;
+    let err = must_refuse(&trailer, &id, "trailer byte");
+    assert!(matches!(err, Error::BadSignature), "trailer byte: {err}");
 }

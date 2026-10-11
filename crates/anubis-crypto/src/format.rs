@@ -30,7 +30,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::io::{Seek, SeekFrom};
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::container::{VersionLinePolicy, classify_version_line};
 use crate::error::{Error, Result};
@@ -112,18 +112,17 @@ fn wrap_file_key(wrap_key: &[u8; 32], file_key: &[u8; FILE_KEY_LEN]) -> Result<V
     Ok(buf)
 }
 
-fn unwrap_file_key(wrap_key: &[u8; 32], wrapped: &[u8]) -> Option<[u8; FILE_KEY_LEN]> {
+fn unwrap_file_key(wrap_key: &[u8; 32], wrapped: &[u8]) -> Option<Zeroizing<[u8; FILE_KEY_LEN]>> {
     let cipher = ChaCha20Poly1305::new(wrap_key.into());
-    let mut buf = wrapped.to_vec();
+    let mut buf = Zeroizing::new(wrapped.to_vec());
     cipher
-        .decrypt_in_place(&Nonce::from([0u8; 12]), b"", &mut buf)
+        .decrypt_in_place(&Nonce::from([0u8; 12]), b"", &mut *buf)
         .ok()?;
-    let mut key = [0u8; FILE_KEY_LEN];
     if buf.len() != FILE_KEY_LEN {
         return None;
     }
+    let mut key = Zeroizing::new([0u8; FILE_KEY_LEN]);
     key.copy_from_slice(&buf);
-    buf.zeroize();
     Some(key)
 }
 
@@ -223,7 +222,17 @@ impl Header {
             line.clear();
             // Bound the read so a file without newlines cannot exhaust memory.
             let mut limited = reader.take(MAX_HEADER_LINE as u64);
-            let n = limited.read_line(line)?;
+            // Bytes that are not UTF-8 cannot form a header line at all.
+            // That is a malformed header, not an I/O failure, and is
+            // classified as one so a hostile file is never reported as a
+            // broken disk.
+            let n = limited.read_line(line).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::InvalidData {
+                    Error::Header("header line is not valid UTF-8".into())
+                } else {
+                    Error::Io(e)
+                }
+            })?;
             let ends_with_lf = line.ends_with('\n');
             let has_trailing_whitespace = if ends_with_lf {
                 let content = &line[..line.len() - 1];
@@ -473,8 +482,10 @@ where
         )));
     }
 
-    let mut file_key = [0u8; FILE_KEY_LEN];
-    getrandom::fill(&mut file_key)
+    // Wrapped so every exit path, including an I/O error part-way through
+    // the payload, wipes the file key rather than only the success path.
+    let mut file_key = Zeroizing::new([0u8; FILE_KEY_LEN]);
+    getrandom::fill(file_key.as_mut_slice())
         .map_err(|e| Error::Key(format!("system entropy unavailable: {e}")))?;
 
     let mut stanzas = Vec::with_capacity(opts.recipients.len());
@@ -492,12 +503,12 @@ where
         .map(|id| id.verifying_key().encode().as_slice().to_vec());
 
     let body = header_body(&stanzas, vk_bytes.as_deref());
-    let mut mac_key = header_mac_key(&file_key);
-    let mut mac = <HmacSha512 as hmac::digest::KeyInit>::new_from_slice(&mac_key)
+    let mac_key = Zeroizing::new(header_mac_key(&file_key));
+    let mut mac = <HmacSha512 as hmac::digest::KeyInit>::new_from_slice(mac_key.as_slice())
         .map_err(|_| Error::Integrity("MAC key rejected".into()))?;
     mac.update(body.as_bytes());
     let tag = mac.finalize().into_bytes();
-    mac_key.zeroize();
+    drop(mac_key);
 
     let mut header = body.into_bytes();
     header.extend_from_slice(b"--- ");
@@ -510,7 +521,8 @@ where
     let mut hasher = Sha512::new();
     hasher.update(&header);
 
-    let mut pk = payload_key(&file_key);
+    let pk = Zeroizing::new(payload_key(&file_key));
+    drop(file_key);
     let total = {
         let mut tee = HashingWriter {
             inner: &mut *writer,
@@ -518,8 +530,7 @@ where
         };
         stream::encrypt(&pk, reader, &mut tee, progress)?
     };
-    pk.zeroize();
-    file_key.zeroize();
+    drop(pk);
 
     if let Some(signer) = opts.signer {
         let digest = hasher.finalize();
@@ -888,7 +899,10 @@ where
     let mut file_key = None;
     'outer: for id in identities {
         for st in &header.stanzas {
-            let Ok(wrap) = hybrid::decapsulate(id, &st.epk, &st.mlkem_ct) else {
+            // Wrapped at the boundary so a trial wrap key that does not
+            // unwrap is wiped on the way out instead of left on the stack.
+            let Ok(wrap) = hybrid::decapsulate(id, &st.epk, &st.mlkem_ct).map(Zeroizing::new)
+            else {
                 continue;
             };
             if let Some(fk) = unwrap_file_key(&wrap, &st.wrapped) {
@@ -897,19 +911,19 @@ where
             }
         }
     }
-    let Some(mut file_key) = file_key else {
+    let Some(file_key) = file_key else {
         return Err(Error::NoMatch);
     };
 
     // Authenticate the header before trusting anything in it.
-    let mut mac_key = header_mac_key(&file_key);
-    let mut mac = <HmacSha512 as hmac::digest::KeyInit>::new_from_slice(&mac_key)
+    let mac_key = Zeroizing::new(header_mac_key(&file_key));
+    let mut mac = <HmacSha512 as hmac::digest::KeyInit>::new_from_slice(mac_key.as_slice())
         .map_err(|_| Error::Integrity("MAC key rejected".into()))?;
     mac.update(header.body());
     let expected = mac.finalize().into_bytes();
-    mac_key.zeroize();
+    drop(mac_key);
     if expected.as_slice().ct_eq(&header.mac).unwrap_u8() != 1 {
-        file_key.zeroize();
+        drop(file_key);
         return Err(Error::Integrity(
             "header authentication failed: the header was modified".into(),
         ));
@@ -921,7 +935,7 @@ where
     content_hasher.update(&header.raw);
 
     let pk = Zeroizing::new(payload_key(&file_key));
-    file_key.zeroize();
+    drop(file_key);
 
     // Split payload from trailer.
     let (total, sig_bytes) = match (payload_len, signed) {

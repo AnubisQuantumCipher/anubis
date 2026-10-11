@@ -450,6 +450,10 @@ fn secret_identity_arguments_are_redacted_from_output_and_audit() {
         !audit.contains(&identity),
         "secret identity reached persistent audit data"
     );
+    assert!(
+        !audit.to_ascii_uppercase().contains("ANUBIS-SECRET-KEY-1"),
+        "a secret-identity capability marker reached persistent audit data"
+    );
     std::fs::remove_dir_all(home).expect("remove test home");
 }
 
@@ -1072,4 +1076,427 @@ fn v4_refuses_before_v3_identity_access_or_plaintext_staging() {
         "v4 refusal touched the v3 identity store"
     );
     std::fs::remove_dir_all(home).expect("remove private home");
+}
+
+fn path_str(path: &std::path::Path) -> &str {
+    path.to_str().expect("UTF-8 path")
+}
+
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+/// FORMAT.md 13 vector 23, SECURITY.md 2.4 and README "Signature policy on
+/// decrypt": a recipient can re-encrypt the same plaintext without a
+/// signature and the result decrypts as an ordinary unsigned container. The
+/// only mitigation is a caller policy, and that policy must refuse before any
+/// plaintext reaches a path or a pipe.
+#[test]
+fn signature_policy_refuses_unsigned_and_mismatched_containers_without_publishing() {
+    const WRONG_PIN: &str = "0000-0000-0000-0000-0000";
+    let home = private_home("signature-policy");
+    let (recipient, _identity) = generated_identity(&home);
+    let signer =
+        json_line(&run(&home, &["--json", "status"]))["identities"][0]["signing_fingerprint"]
+            .as_str()
+            .expect("signing fingerprint")
+            .to_owned();
+
+    let plain = home.join("note.txt");
+    std::fs::write(&plain, b"policy is enforced before publication").expect("write plaintext");
+    let signed = home.join("signed.anubis");
+    let encrypt = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "--sign",
+            "-o",
+            path_str(&signed),
+            path_str(&plain),
+        ],
+    );
+    assert!(
+        encrypt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&encrypt.stderr)
+    );
+
+    // A recipient strips the signature: decrypt, then re-encrypt without --sign.
+    let recovered = home.join("recovered.txt");
+    let decrypt = run(
+        &home,
+        &["decrypt", "-o", path_str(&recovered), path_str(&signed)],
+    );
+    assert!(
+        decrypt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decrypt.stderr)
+    );
+    let unsigned = home.join("unsigned.anubis");
+    let reencrypt = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-o",
+            path_str(&unsigned),
+            path_str(&recovered),
+        ],
+    );
+    assert!(reencrypt.status.success());
+
+    // Vector 23, first half: the downgraded container is an ordinary unsigned
+    // file and decrypts cleanly. Nothing in the format can detect this.
+    let downgraded_out = home.join("downgraded.txt");
+    let downgraded = run(
+        &home,
+        &[
+            "--json",
+            "decrypt",
+            "-o",
+            path_str(&downgraded_out),
+            path_str(&unsigned),
+        ],
+    );
+    assert!(downgraded.status.success());
+    let downgraded_json = json_line(&downgraded);
+    assert_eq!(downgraded_json["signed"], serde_json::json!(false));
+    assert!(downgraded_json["signer_fingerprint"].is_null());
+    assert_eq!(
+        std::fs::read(&downgraded_out).expect("read downgraded"),
+        std::fs::read(&plain).expect("read plaintext")
+    );
+
+    // Vector 23, second half, and SECURITY.md 2.4: every policy refusal
+    // publishes nothing, to a path or to a pipe.
+    let refusals: [(&std::path::Path, Vec<&str>, &str); 3] = [
+        (
+            &unsigned,
+            vec!["--require-signature"],
+            "unsigned under --require-signature",
+        ),
+        (
+            &unsigned,
+            vec!["--signer", &signer],
+            "unsigned under --signer",
+        ),
+        (
+            &signed,
+            vec!["--signer", WRONG_PIN],
+            "signed by another key under --signer",
+        ),
+    ];
+    for (index, (container, policy, label)) in refusals.iter().enumerate() {
+        let destination = home.join(format!("refused-{index}.txt"));
+        let mut args = vec!["decrypt"];
+        args.extend(policy.iter().copied());
+        args.extend(["-o", path_str(&destination), path_str(container)]);
+        let to_file = run(&home, &args);
+        assert!(
+            !to_file.status.success(),
+            "{label}: decrypt to a file must fail"
+        );
+        assert!(
+            to_file.stdout.is_empty(),
+            "{label}: nothing may reach stdout"
+        );
+        assert!(
+            !destination.exists(),
+            "{label}: no plaintext may be published"
+        );
+        assert_no_sidecar(&home, &destination);
+
+        let mut args = vec!["decrypt"];
+        args.extend(policy.iter().copied());
+        args.extend(["-o", "-", path_str(container)]);
+        let to_stdout = run(&home, &args);
+        assert!(
+            !to_stdout.status.success(),
+            "{label}: decrypt to stdout must fail"
+        );
+        assert!(
+            to_stdout.stdout.is_empty(),
+            "{label}: zero bytes may reach the pipe"
+        );
+    }
+
+    // Control: the pinned signer passes, and both the plaintext and the
+    // identity file are private (FORMAT.md 11.5, SECURITY.md 3.2).
+    let pinned_out = home.join("pinned.txt");
+    let pinned = run(
+        &home,
+        &[
+            "--json",
+            "decrypt",
+            "--signer",
+            &signer,
+            "-o",
+            path_str(&pinned_out),
+            path_str(&signed),
+        ],
+    );
+    assert!(
+        pinned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let pinned_json = json_line(&pinned);
+    assert_eq!(pinned_json["signature_ok"], serde_json::json!(true));
+    assert_eq!(
+        pinned_json["signer_fingerprint"].as_str(),
+        Some(signer.as_str())
+    );
+    assert_eq!(
+        std::fs::read(&pinned_out).expect("read pinned"),
+        std::fs::read(&plain).expect("read plaintext")
+    );
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            mode_of(&pinned_out),
+            0o600,
+            "decrypted plaintext must be created at mode 0600"
+        );
+        assert_eq!(
+            mode_of(&home.join(".config/anubis/identities/default.key")),
+            0o600,
+            "identity file must be mode 0600"
+        );
+    }
+
+    std::fs::remove_dir_all(home).expect("remove test home");
+}
+
+/// FORMAT.md 13 vectors 9 and 22, README "decrypt never emits a byte until the
+/// whole container has verified": corrupting the last chunk of a multi-chunk
+/// container, or the signature trailer, publishes nothing to a destination
+/// path, to stdout, or to stdout from a pipe, signed and unsigned alike.
+#[test]
+fn payload_or_trailer_corruption_publishes_nothing_to_a_path_or_a_pipe() {
+    let home = private_home("tamper-publication");
+    let (recipient, _identity) = generated_identity(&home);
+    let plain = home.join("big.bin");
+    let body: Vec<u8> = (0..2 * anubis_crypto::stream::CHUNK + 77)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    std::fs::write(&plain, &body).expect("write plaintext");
+
+    for sign in [false, true] {
+        let label = if sign { "signed" } else { "unsigned" };
+        let sealed = home.join(format!("{label}.anubis"));
+        let mut args = vec!["encrypt", "-r", &recipient];
+        if sign {
+            args.push("--sign");
+        }
+        args.extend(["-o", path_str(&sealed), path_str(&plain)]);
+        assert!(run(&home, &args).status.success(), "{label}: encrypt");
+
+        let bytes = std::fs::read(&sealed).expect("read container");
+        let trailer = if sign {
+            anubis_crypto::format::SIG_LEN
+        } else {
+            0
+        };
+        let mut variants = vec![("last-chunk", bytes.len() - trailer - 1)];
+        if sign {
+            variants.push(("trailer", bytes.len() - 1));
+        }
+
+        for (variant, index) in variants {
+            let mut corrupted = bytes.clone();
+            corrupted[index] ^= 1;
+            let path = home.join(format!("{label}-{variant}.anubis"));
+            std::fs::write(&path, &corrupted).expect("write corrupted container");
+
+            let destination = home.join(format!("{label}-{variant}.out"));
+            let to_file = run(
+                &home,
+                &["decrypt", "-o", path_str(&destination), path_str(&path)],
+            );
+            assert!(!to_file.status.success(), "{label} {variant}: must fail");
+            assert!(
+                !destination.exists(),
+                "{label} {variant}: no partial plaintext at the destination"
+            );
+            assert_no_sidecar(&home, &destination);
+
+            let to_stdout = run(&home, &["decrypt", "-o", "-", path_str(&path)]);
+            assert!(!to_stdout.status.success());
+            assert!(
+                to_stdout.stdout.is_empty(),
+                "{label} {variant}: zero bytes may reach stdout"
+            );
+
+            let piped = Command::new(bin())
+                .args(["decrypt", "-o", "-", "-"])
+                .env("HOME", &home)
+                .stdin(Stdio::from(
+                    std::fs::File::open(&path).expect("open corrupted container"),
+                ))
+                .output()
+                .expect("decrypt from a pipe");
+            assert!(!piped.status.success());
+            assert!(
+                piped.stdout.is_empty(),
+                "{label} {variant}: zero bytes may reach the pipe"
+            );
+        }
+
+        // Control: the intact container round-trips through both destinations.
+        let good_out = home.join(format!("{label}.out"));
+        assert!(
+            run(
+                &home,
+                &["decrypt", "-o", path_str(&good_out), path_str(&sealed)]
+            )
+            .status
+            .success()
+        );
+        assert_eq!(std::fs::read(&good_out).expect("read plaintext"), body);
+        let good_stdout = run(&home, &["decrypt", "-o", "-", path_str(&sealed)]);
+        assert!(good_stdout.status.success());
+        assert_eq!(good_stdout.stdout, body);
+    }
+
+    std::fs::remove_dir_all(home).expect("remove test home");
+}
+
+/// README "Duplicate recipients are de-duplicated" and FORMAT.md 4.4: the CLI
+/// collapses byte-identical recipients named through -r and -R on write,
+/// while distinct recipients each keep their stanza.
+#[test]
+fn cli_deduplicates_repeated_recipients_on_write() {
+    let home = private_home("dedup");
+    let other_home = private_home("dedup-other");
+    let (recipient, _) = generated_identity(&home);
+    let (other, _) = generated_identity(&other_home);
+    let plain = home.join("p.txt");
+    std::fs::write(&plain, b"dedup").expect("write plaintext");
+    let list = home.join("team.txt");
+    std::fs::write(&list, format!("# twice\n{recipient}\n\n{recipient}\n"))
+        .expect("write recipients file");
+
+    let once = home.join("once.anubis");
+    let encrypt = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-r",
+            &recipient,
+            "-R",
+            path_str(&list),
+            "-o",
+            path_str(&once),
+            path_str(&plain),
+        ],
+    );
+    assert!(encrypt.status.success());
+    let info = json_line(&run(&home, &["--json", "inspect", path_str(&once)]));
+    assert_eq!(info["recipients"], serde_json::json!(1));
+    assert_eq!(info["header_bytes"], serde_json::json!(2344));
+
+    let twice = home.join("twice.anubis");
+    let encrypt = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "-r",
+            &other,
+            "-o",
+            path_str(&twice),
+            path_str(&plain),
+        ],
+    );
+    assert!(encrypt.status.success());
+    let info = json_line(&run(&home, &["--json", "inspect", path_str(&twice)]));
+    assert_eq!(info["recipients"], serde_json::json!(2));
+    assert_eq!(info["header_bytes"], serde_json::json!(4572));
+
+    std::fs::remove_dir_all(home).expect("remove test home");
+    std::fs::remove_dir_all(other_home).expect("remove other home");
+}
+
+/// README "ASCII armor" and FORMAT.md 12.6: 12383906 plaintext bytes armor to
+/// exactly 16777216 bytes and round-trip; one byte more is refused before
+/// anything is written.
+#[test]
+fn armor_write_side_boundary_is_exact_and_refuses_before_writing() {
+    let home = private_home("armor-boundary");
+    let (recipient, _) = generated_identity(&home);
+    let at_cap = home.join("at-cap.bin");
+    let over_cap = home.join("over-cap.bin");
+    let body = vec![0x5au8; 12_383_906];
+    std::fs::write(&at_cap, &body).expect("write at-cap plaintext");
+    let mut more = body.clone();
+    more.push(0x5a);
+    std::fs::write(&over_cap, &more).expect("write over-cap plaintext");
+
+    let armored = home.join("at-cap.anubis.txt");
+    let ok = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "--armor",
+            "-o",
+            path_str(&armored),
+            path_str(&at_cap),
+        ],
+    );
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(
+        std::fs::metadata(&armored).expect("armored metadata").len(),
+        16_777_216
+    );
+    let out = home.join("at-cap.out");
+    assert!(
+        run(
+            &home,
+            &["decrypt", "-o", path_str(&out), path_str(&armored)]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(std::fs::read(&out).expect("read round trip"), body);
+
+    let refused_path = home.join("over-cap.anubis.txt");
+    let refused = run(
+        &home,
+        &[
+            "encrypt",
+            "-r",
+            &recipient,
+            "--armor",
+            "-o",
+            path_str(&refused_path),
+            path_str(&over_cap),
+        ],
+    );
+    assert!(
+        !refused.status.success(),
+        "one byte over the cap must refuse"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("16777216"));
+    assert!(!refused_path.exists(), "a refused armor must write nothing");
+    assert_no_sidecar(&home, &refused_path);
+
+    std::fs::remove_dir_all(home).expect("remove test home");
 }

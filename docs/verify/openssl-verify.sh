@@ -81,9 +81,14 @@ case "${1:-}" in
   -h|--help|'') sed -n '2,46p' "$0"; exit 2 ;;
 esac
 FILE=$1
-if ! exec 3< "$FILE" 2>/dev/null; then
-    die "cannot open input"
-fi
+# Readability is checked before the redirection: a failed `exec` redirection
+# is fatal in bash, and the redirection itself must not carry `2>/dev/null`.
+# `exec` with only redirections applies them to this shell permanently, so
+# that form silenced every later diagnostic for the rest of the run.
+[ -e "$FILE" ] || die "cannot open input: $FILE does not exist"
+[ -f "$FILE" ] || die "cannot open input: $FILE is not a regular file"
+[ -r "$FILE" ] || die "cannot open input: $FILE is not readable"
+exec 3< "$FILE"
 # Every utility reopens this already-open descriptor, never the caller's path.
 # A symlink replacement therefore cannot splice observations from two files.
 SOURCE_FD="/proc/$$/fd/3"
@@ -187,6 +192,23 @@ if [ -z "${VK_OFF:-}" ]; then
     exit 2
 fi
 [ "$VK_OFF" -lt "$HEADER_LEN" ] || die "mldsa87 stanza found outside the header"
+
+# FORMAT.md 4.3: exactly one mldsa87 stanza, and only after at least one
+# recipient block. A keyless verifier must refuse a header advertising two
+# signers at parse time rather than resolve it to whichever stanza came first.
+# This is still not a complete grammar check; see VERIFYING.md.
+HEADER_SCAN="$WORK/header.scan"
+head -c "$HEADER_LEN" "$HEAD_SCAN" > "$HEADER_SCAN"
+SIG_COUNT=$(LC_ALL=C grep -a -c '^-> mldsa87 ' "$HEADER_SCAN") || true
+[ "$SIG_COUNT" = 1 ] \
+  || die "header carries $SIG_COUNT mldsa87 stanzas; exactly one is permitted (FORMAT.md 4.3)"
+RECIPIENT_COUNT=$(LC_ALL=C grep -a -c '^-> hybrid-x25519-mlkem1024 ' "$HEADER_SCAN") || true
+[ "$RECIPIENT_COUNT" -ge 1 ] \
+  || die "header carries no recipient block (FORMAT.md 4.3)"
+LAST_RECIPIENT_OFF=$(LC_ALL=C grep -a -b -o '^-> hybrid-x25519-mlkem1024 ' "$HEADER_SCAN" \
+                     | tail -n1 | cut -d: -f1)
+[ "$LAST_RECIPIENT_OFF" -lt "$VK_OFF" ] \
+  || die "mldsa87 stanza precedes a recipient block (FORMAT.md 4.3)"
 say "signed         : yes"
 
 # --- 4. region arithmetic ----------------------------------------------------

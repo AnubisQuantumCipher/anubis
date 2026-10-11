@@ -60,7 +60,10 @@ pub fn payload_geometry(bytes: u64) -> Result<PayloadGeometry> {
 }
 
 fn nonce_for(counter: u64, last: bool) -> Result<Nonce> {
-    // 11-byte counter space; refuse rather than wrap.
+    // The wire field is 11 bytes (FORMAT.md 8.2). This implementation places
+    // a u64 in bytes 3..11 and refuses at 2^56 chunks, which is 2^72 payload
+    // bytes: stricter than the format's 2^88 - 1 and equally unreachable.
+    // Refuse rather than wrap.
     if counter >= 1u64 << 56 {
         return Err(Error::Integrity("chunk counter exhausted".into()));
     }

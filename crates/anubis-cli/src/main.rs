@@ -15,6 +15,7 @@ use serde_json::json;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use zeroize::Zeroizing;
 
 const SUITE_KEM: &str = "X25519+ML-KEM-1024";
 const SUITE_SIG: &str = "ML-DSA-87";
@@ -443,14 +444,17 @@ fn cmd_keygen(json: bool, name: &str, force: bool) -> Result<()> {
     }
 
     let id = Identity::generate().map_err(|e| anyhow!("{e}"))?;
-    let encoded = id.encode().map_err(|e| anyhow!("{e}"))?;
+    // The encoded identity and the file body carrying it are secrets: wipe
+    // both when they go out of scope instead of leaving them in freed heap.
+    let encoded = Zeroizing::new(id.encode().map_err(|e| anyhow!("{e}"))?);
     let recipient = id.to_recipient().map_err(|e| anyhow!("{e}"))?;
     let rec_str = recipient.encode().map_err(|e| anyhow!("{e}"))?;
     let created = audit::now_iso();
 
-    let body = format!(
-        "# ANUBIS identity: {name}\n# created: {created}\n# recipient: {rec_str}\n{encoded}\n"
-    );
+    let body = Zeroizing::new(format!(
+        "# ANUBIS identity: {name}\n# created: {created}\n# recipient: {rec_str}\n{}\n",
+        encoded.as_str()
+    ));
     write_secret(&path, body.as_bytes(), force)?;
 
     audit::append(&audit::Record {
@@ -508,12 +512,13 @@ fn write_secret(path: &Path, bytes: &[u8], force: bool) -> Result<()> {
 
 fn load_identity(name: &str) -> Result<Identity> {
     let path = paths::identity_path(name)?;
-    let text = std::fs::read_to_string(&path).with_context(|| {
+    // The file text carries the identity string; wipe it once parsed.
+    let text = Zeroizing::new(std::fs::read_to_string(&path).with_context(|| {
         format!(
             "no identity '{name}' at {} (run: anubis keygen --name {name})",
             path.display()
         )
-    })?;
+    })?);
     parse_identity(&text)
 }
 
@@ -552,7 +557,7 @@ fn all_identities() -> Result<Vec<(String, Identity)>> {
         if paths::check_name(stem).is_err() {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&p) else {
+        let Ok(text) = std::fs::read_to_string(&p).map(Zeroizing::new) else {
             continue;
         };
         if let Ok(id) = parse_identity(&text) {
